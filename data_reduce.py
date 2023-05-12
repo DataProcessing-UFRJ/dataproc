@@ -19,6 +19,7 @@ def parse_arguments():
     )
     parser.add_argument(
         "--filter_keywords", nargs="+", default=['filter'],
+        metavar="keyword1 keyword2",
         help="header keywords containg the photometric filters used (default: %(default)s)"
     )
     parser.add_argument(
@@ -26,8 +27,9 @@ def parse_arguments():
         help="output table: summary of main header keywords of each image (default: %(default)s)"
     )
     parser.add_argument(
-        "--keywords", nargs="+", action="append",
+        "--summary_keywords", nargs="+", action="append",
         default=['obstype','time-obs','ccdsum','airmass','exptime','object'],
+        metavar="keyword1 keyword2",
         help="keywords used to build the 'summary_file' output table (default: %(default)s)"
     )
     parser.add_argument(
@@ -35,8 +37,8 @@ def parse_arguments():
         help="file to log the opperations performed over the images (default: %(default)s)"
     )
     parser.add_argument(
-        "-mp", "--multiprocessing", action="store_true", default=False,
-        help="enable splitting image processing over all CPU cores (default: %(False)s)"
+        "--multiprocessing", action="store_true", default=False,
+        help="enable splitting image processing over all CPU cores (default: %(default)s)"
     )
     
     args=parser.parse_args()
@@ -46,23 +48,23 @@ def parse_arguments():
     if args.folder[-1] != '/': args.folder += '/'
 
     #..fixing nested listing inside 'keywords' argument
-    keylist = args.keywords
+    keylist = args.summary_keywords
     keylist += args.filter_keywords
-    args.keywords = list(flatten(keylist))
+    args.summary_keywords = list(flatten(keylist))
 
     return args
 
 
 def data_reduce(folder,
                 filter_keywords=['filter'],
-                keywords=['obstype','exptime','object'],
+                summary_keywords=['obstype','exptime','object'],
                 summary_file='observations.log',
                 logfile='data_reduce.log',
                 multiprocessing=False):
     
     #.initiating ImageFileCollection
     ifc = ImageFileCollection(
-        folder, keywords=keywords, ext=0, 
+        folder, keywords=summary_keywords, ext=0, 
         glob_exclude='*master*.fits', glob_include='*.fits')
     
     #.writing data summary table
@@ -95,7 +97,7 @@ if __name__ == '__main__':
     args = parse_arguments()
     data_reduce(args.folder,
                 filter_keywords=args.filter_keywords,
-                keywords=args.keywords,
+                summary_keywords=args.summary_keywords,
                 summary_file=args.summary_file,
                 logfile=args.logfile,
                 multiprocessing=args.multiprocessing)
