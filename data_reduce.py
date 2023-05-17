@@ -4,10 +4,6 @@ from dataprocessing_functions import process_bias, process_flat, process_images
 
 def parse_arguments():
 
-    #.list flattening generator
-    flatten = lambda *n: (e for a in n
-    for e in (flatten(*a) if isinstance(a, (tuple, list)) else (a,)))
-
     #.parsing command line elements to function arguments.
     parser = ArgumentParser(
         prog="data_reduce", 
@@ -47,11 +43,6 @@ def parse_arguments():
     args.folder = args.folder.strip()
     if args.folder[-1] != '/': args.folder += '/'
 
-    #..fixing nested listing inside 'keywords' argument
-    keylist = args.summary_keywords
-    keylist += args.filter_keywords
-    args.summary_keywords = list(flatten(keylist))
-
     return args
 
 
@@ -62,6 +53,12 @@ def data_reduce(folder,
                 logfile='data_reduce.log',
                 multiprocessing=False):
     
+    #.processing filter keywords
+    if isinstance(filter_keywords,str): 
+        filter_keywords=filter_keywords.split(',')
+    for keyw in filter_keywords: 
+        if keyw not in summary_keywords: summary_keywords.append(keyw)
+
     #.initiating ImageFileCollection
     ifc = ImageFileCollection(
         folder, keywords=summary_keywords, ext=0, 
