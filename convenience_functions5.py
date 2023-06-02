@@ -1,8 +1,8 @@
 from astropy import visualization as aviz
-from astropy.nddata.utils import block_reduce, Cutout2D
-from astropy.nddata import CCDData
+from astropy.nddata.utils import Cutout2D
+from astropy.nddata import CCDData, block_reduce
 from astropy.io import fits
-from astropy.stats import sigma_clipped_stats, SigmaClip
+from astropy.stats import mad_std
 from matplotlib import pyplot as plt
 import matplotlib.ticker as ticker
 import numpy as np
@@ -10,6 +10,11 @@ import re
 
 #=============================================================================
 
+# #.list flattening generator
+# flatten = lambda *n: (e for a in n
+# for e in (flatten(*a) if isinstance(a, (tuple, list)) else (a,)))
+
+#=============================================================================
 def find_filter(image, filter_list, filter_keywords):
     """
     Given an image and some filter keywords, search if any of these keywords
@@ -87,6 +92,26 @@ def center_median(image_matrix, frac_size=0.5):
 
 #=============================================================================
 
+def center_mode(image_matrix, frac_size=0.5):
+
+    #  Orientation
+    ysz, xsz = image_matrix.shape
+    yc, xc = int(ysz/2), int(xsz/2)                     # Center
+    dy, dx = int(ysz*frac_size/2), int(xsz*frac_size/2) # Step
+
+    #  Limits
+    a, b = yc - dy, yc + dy
+    c, d = xc - dx, xc + dy
+
+    roi = image_matrix[a:b, c:d]
+    med, mad = np.median(roi), mad_std(roi)
+    hist, bin_edge = np.histogram(roi,bins='rice',range=(med-6*mad,med+6*mad))
+    bin_cen = (bin_edge[:-1]+bin_edge[1:])/2
+
+    return bin_cen[np.argmax(hist)]
+
+#=============================================================================
+
 def flat_scale(flat_list, normalize=True):
     """
     Given a list of flat field fits files, parse through all extensions, 
@@ -118,17 +143,121 @@ def flat_scale(flat_list, normalize=True):
             scales = np.zeros([len(flat_list),len(image_indices)])
     
         for i,idx in enumerate(image_indices,start=0):
-            scales[j,i], _ = center_median(hdus[idx].data, frac_size=0.25)
+            scales[j,i] = center_mode(hdus[idx].data, frac_size=0.90)
 
         hdus.close()
     
     scales = np.amax(scales, axis=1)
     
     if normalize:
-        scales /= scales.max()
+        scales /= scales[0]
         
     return scales
 
+
+#=============================================================================
+
+def show_image(image,
+               percl=99, percu=None, is_mask=False,
+               figsize=(10, 10), fontsize=14,
+               cmap='viridis', stretch=aviz.LinearStretch(), mask=None,
+               show_colorbar=True, show_ticks=True,
+               fig=None, ax=None, input_ratio=None):
+    """
+    Show an image in matplotlib with some basic astronomically-appropriat stretching.
+
+    Parameters
+    ----------
+    image
+        The image to show
+    percl : number
+        The percentile for the lower edge of the stretch (or both edges if ``percu`` is None)
+    percu : number or None
+        The percentile for the upper edge of the stretch (or None to use ``percl`` for both)
+    figsize : 2-tuple
+        The size of the matplotlib figure in inches
+    """
+    
+    # Changing general font size for Pyplot
+    plt.rcParams.update({'font.size': fontsize})
+    
+    if percu is None:
+        percu = percl
+        percl = 100 - percl
+
+    if (fig is None and ax is not None) or (fig is not None and ax is None):
+        raise ValueError('Must provide both "fig" and "ax" '
+                         'if you provide one of them')
+    elif fig is None and ax is None:
+        if figsize is not None:
+            # Rescale the fig size to match the image dimensions, roughly
+            image_aspect_ratio = image.shape[0] / image.shape[1]
+            figsize = (max(figsize) * image_aspect_ratio, max(figsize))
+
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+
+    # To preserve details we should *really* downsample correctly and
+    # not rely on matplotlib to do it correctly for us (it won't).
+
+    # So, calculate the size of the figure in pixels, block_reduce to
+    # roughly that,and display the block reduced image.
+
+    # Thanks, https://stackoverflow.com/questions/29702424/how-to-get-matplotlib-figure-size
+    fig_size_pix = fig.get_size_inches() * fig.dpi
+
+    ratio = (image.shape // fig_size_pix).max()
+
+    if ratio < 1:
+        ratio = 1
+
+    ratio = input_ratio or ratio
+
+    reduced_data = block_reduce(image, ratio)
+
+    if not is_mask:
+        # Divide by the square of the ratio to keep the flux the same in the
+        # reduced image. We do *not* want to do this for images which are
+        # masks, since their values should be zero or one.
+         reduced_data = reduced_data / ratio**2
+
+    # Of course, now that we have downsampled, the axis limits are changed to
+    # match the smaller image size. Setting the extent will do the trick to
+    # change the axis display back to showing the actual extent of the image.
+    extent = [0, image.shape[1], 0, image.shape[0]]
+
+    norm = aviz.ImageNormalize(reduced_data,
+                               interval=aviz.AsymmetricPercentileInterval(percl, percu),
+                               stretch=stretch)
+
+    if is_mask:
+        # The image is a mask in which pixels should be zero or one.
+        # block_reduce may have changed some of the values, so reset here.
+        reduced_data = reduced_data > 0
+        # Set the image scale limits appropriately.
+        scale_args = dict(vmin=0, vmax=1)
+    else:
+        scale_args = dict(norm=norm)
+
+        
+    if mask is not None:
+        msk = block_reduce(mask, ratio)
+        msk = msk > 0
+        reduced_data[msk == 1] = np.nan
+
+
+    im = ax.imshow(reduced_data, origin='lower',
+                   cmap=cmap, extent=extent, aspect='equal', **scale_args)
+    ax.xaxis.set_major_locator(ticker.MultipleLocator(256))
+    ax.yaxis.set_major_locator(ticker.MultipleLocator(256))
+
+    if show_colorbar:
+        sep, wid = 0.01, 0.03
+        cax = fig.add_axes([ax.get_position().x1+sep,ax.get_position().y0,wid,ax.get_position().height])
+        plt.colorbar(im, cax=cax)
+
+    if not show_ticks:
+        ax.tick_params(labelbottom=False, labelleft=False, labelright=False, labeltop=False)
 
 #=============================================================================
         
@@ -291,110 +420,6 @@ def iraf2python(my_string):
     y[0] -= 1
 
     return x, y
-
-#=============================================================================
-
-def show_image(image,
-               percl=99, percu=None, is_mask=False,
-               figsize=(10, 10), fontsize=14,
-               cmap='viridis', stretch=aviz.LinearStretch(), mask=None,
-               show_colorbar=True, show_ticks=True,
-               fig=None, ax=None, input_ratio=None):
-    """
-    Show an image in matplotlib with some basic astronomically-appropriat stretching.
-
-    Parameters
-    ----------
-    image
-        The image to show
-    percl : number
-        The percentile for the lower edge of the stretch (or both edges if ``percu`` is None)
-    percu : number or None
-        The percentile for the upper edge of the stretch (or None to use ``percl`` for both)
-    figsize : 2-tuple
-        The size of the matplotlib figure in inches
-    """
-    
-    # Changing general font size for Pyplot
-    plt.rcParams.update({'font.size': fontsize})
-    
-    if percu is None:
-        percu = percl
-        percl = 100 - percl
-
-    if (fig is None and ax is not None) or (fig is not None and ax is None):
-        raise ValueError('Must provide both "fig" and "ax" '
-                         'if you provide one of them')
-    elif fig is None and ax is None:
-        if figsize is not None:
-            # Rescale the fig size to match the image dimensions, roughly
-            image_aspect_ratio = image.shape[0] / image.shape[1]
-            figsize = (max(figsize) * image_aspect_ratio, max(figsize))
-
-        fig, ax = plt.subplots(1, 1, figsize=figsize)
-
-
-    # To preserve details we should *really* downsample correctly and
-    # not rely on matplotlib to do it correctly for us (it won't).
-
-    # So, calculate the size of the figure in pixels, block_reduce to
-    # roughly that,and display the block reduced image.
-
-    # Thanks, https://stackoverflow.com/questions/29702424/how-to-get-matplotlib-figure-size
-    fig_size_pix = fig.get_size_inches() * fig.dpi
-
-    ratio = (image.shape // fig_size_pix).max()
-
-    if ratio < 1:
-        ratio = 1
-
-    ratio = input_ratio or ratio
-
-    reduced_data = block_reduce(image, ratio)
-
-    if not is_mask:
-        # Divide by the square of the ratio to keep the flux the same in the
-        # reduced image. We do *not* want to do this for images which are
-        # masks, since their values should be zero or one.
-         reduced_data = reduced_data / ratio**2
-
-    # Of course, now that we have downsampled, the axis limits are changed to
-    # match the smaller image size. Setting the extent will do the trick to
-    # change the axis display back to showing the actual extent of the image.
-    extent = [0, image.shape[1], 0, image.shape[0]]
-
-    norm = aviz.ImageNormalize(reduced_data,
-                               interval=aviz.AsymmetricPercentileInterval(percl, percu),
-                               stretch=stretch)
-
-    if is_mask:
-        # The image is a mask in which pixels should be zero or one.
-        # block_reduce may have changed some of the values, so reset here.
-        reduced_data = reduced_data > 0
-        # Set the image scale limits appropriately.
-        scale_args = dict(vmin=0, vmax=1)
-    else:
-        scale_args = dict(norm=norm)
-
-        
-    if mask is not None:
-        msk = block_reduce(mask, ratio)
-        msk = msk > 0
-        reduced_data[msk == 1] = np.nan
-
-
-    im = ax.imshow(reduced_data, origin='lower',
-                   cmap=cmap, extent=extent, aspect='equal', **scale_args)
-    ax.xaxis.set_major_locator(ticker.MultipleLocator(256))
-    ax.yaxis.set_major_locator(ticker.MultipleLocator(256))
-
-    if show_colorbar:
-        sep, wid = 0.01, 0.03
-        cax = fig.add_axes([ax.get_position().x1+sep,ax.get_position().y0,wid,ax.get_position().height])
-        plt.colorbar(im, cax=cax)
-
-    if not show_ticks:
-        ax.tick_params(labelbottom=False, labelleft=False, labelright=False, labeltop=False)
 
 #=============================================================================
 
