@@ -57,7 +57,8 @@ def image_filters(file_list,
     for file in file_list:
 
         hdr=fits.getheader(file, ext=0)
-        keywds = filter_keywords.split(',')
+        if isinstance(filter_keywords, str): keywds = filter_keywords.split(',')
+        else: keywds = filter_keywords
         filters=[hdr[key] for key in keywds]
 
         igvals = '|'.join(ignore_values.split(','))
@@ -77,6 +78,7 @@ def image_to_ccddata(image, is_hdu=False):
     else: hdul = fits.open(image)
 
     for hdu in hdul:
+        if hdu.name == 'MASK': continue
         if hdu.size == 0: data = ()
         else: data = hdu.data
         ccddata.append(CCDData(data, meta=hdu.header, unit="adu"))

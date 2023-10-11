@@ -48,7 +48,7 @@ def parse_arguments():
 
 def data_reduce(folder,
                 filter_keywords=['filter'],
-                summary_keywords=['obstype','exptime','object'],
+                summary_keywords=['obstype','ut','ccdsum','airmass','exptime','object'],
                 summary_file='observations.log',
                 logfile='data_reduce.log',
                 multiprocessing=False):

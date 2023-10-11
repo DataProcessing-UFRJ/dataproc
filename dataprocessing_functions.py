@@ -9,6 +9,11 @@ from multiprocessing.shared_memory import SharedMemory
 from ccdproc import subtract_overscan, trim_image, subtract_bias, flat_correct, Combiner
 import imageauxiliary_functions as iaf
 
+import warnings
+from astropy.wcs.wcs import FITSFixedWarning
+warnings.simplefilter('ignore', category=FITSFixedWarning)
+warnings.simplefilter('ignore', category=UserWarning)
+
 
 def reduce_image(image_file, 
                  master_bias=None, 
@@ -16,14 +21,15 @@ def reduce_image(image_file,
                  shared_memory=False,
                  merge_amplifiers=True):
 
-    #.Abrindo o arquivo fits da imagem
+    #.opening image FITS file
     hdul = fits.open(image_file)
     image_exts = iaf.image_extensions(hdul, is_hdu=True)
 
     get_date = datetime.now().strftime("%b %d %Y %H:%M")
     fstr = os.path.basename(image_file)
+    inst = hdul[0].header['INSTRUME']
     
-    #..preparando dados do master bias
+    #..preparing master bias data
     if master_bias is not None:
         if shared_memory:
             mbias_ccd = iaf.memory_to_ccddata(master_bias)
@@ -31,7 +37,7 @@ def reduce_image(image_file,
         else: mbias_ccd = master_bias
         bstr = os.path.basename(mbias_ccd[0].header['FILENAME'])
 
-    #.preparando dados dos master flats
+    #.preparing master flats data
     if master_flat is not None:
         if shared_memory: 
             mflat_ccd = iaf.memory_to_ccddata(master_flat)
@@ -39,54 +45,54 @@ def reduce_image(image_file,
         else: mflat_ccd = master_flat
         flstr = os.path.basename(mflat_ccd[0].header['FILENAME'])
 
-    #.preparando para juntar os amplificadores
+    #.preparing to merge amplifiers
     can_merge = (len(image_exts) > 1) and merge_amplifiers and (hdul[0].header['OBSTYPE']=='OBJECT')
     if can_merge:
-         #..coletando binagem e dimensoes da imagem
+         #..collecting binning and size of the image
         ccdsum = hdul[image_exts[0]].header['CCDSUM']
         bin_x, bin_y = int(ccdsum[0]), int(ccdsum[2])
         imsz_x, imsz_y = iaf.iraf2python(hdul[image_exts[0]].header['DETSIZE'])
         imsz_x, imsz_y = int(imsz_x[1]/bin_x), int(imsz_y[1]/bin_y)
         #..SOI gap
-        inst = hdul[0].header['INSTRUME']
         if inst.find('SOI') >= 0: 
             xgap = np.array([0,0,102/bin_x,102/bin_x],dtype=int)
             ygap = np.array([0,0,0,0], dtype=int)
         else: xgap, ygap = np.full(4,0), np.full(4,0)
 
-        #..inicializando imagem final
+        #..initializing output image
         img_merge = np.full((imsz_y+np.amax(ygap), imsz_x+np.amax(xgap)), np.nan, dtype=np.float32)
 
-    #.Loop ao longo das extensoes (amplificadores) da imagem
+    #.Loop over the image extensions (amplifiers)
     proc_string = f".Processing {fstr:1s}"
     skip = np.full(len(image_exts),True)
     for ne,ext in enumerate(image_exts):
 
-        #.Lendo dados desta extensao
+        #.Reading data for this extension
         proc_string+=f" [{ext:1.0f}]"
         img = CCDData(hdul[ext].data, meta=hdul[ext].header, unit="adu")
         
-        #.Realizando correcao de OVERSCAN
+        #.OVERSCAN correction
         if ('BIASSEC' in img.header):
             proc_string+="o"
+
             biassec = img.header['BIASSEC']        
             img = subtract_overscan(img, 
-                        fits_section=biassec, 
-                        model=None, median=True,
-                        add_keyword={'overscan': f"{get_date} Overscan is {biassec}; model=median"})
+                    fits_section=biassec, 
+                    model=None, median=True,
+                    add_keyword={'overscan': f"{get_date} Overscan is {biassec}; model=median"})
 
             #.SOI exception
-            #.(keyword TRIMSEC errada no header)
+            #.(wrong TRIMSEC keyword in header)
             trimsec = img.header['TRIMSEC']
-            if (hdul[0].header['INSTRUME'].find('SOI') >= 0):
+            if (inst.find('SOI') >= 0):
                 if (ext in [1,3]): trimsec = '[29:540,1:2048]'
                 else: trimsec = '[28:539,1:2048]'
 
             img = trim_image(img, 
-                        fits_section=trimsec,
-                        add_keyword={'trim': f"{get_date} Trim is {trimsec}"})
+                    fits_section=trimsec,
+                    add_keyword={'trim': f"{get_date} Trim is {trimsec}"})
             
-            #.Atualizando o header
+            #.Updating header
             imsz = img.shape
             img.header['DATASEC'] = f"[1:{imsz[1]},1:{imsz[0]}]"
             del img.header['BIASSEC']
@@ -95,74 +101,85 @@ def reduce_image(image_file,
             del img.header['BSCALE']
 
             skip[ne] = False
+
+        #.Goodman exception
+        #.(do not have an overscan section)
+        elif inst.find('Goodman') >= 0:
+            proc_string+="o"
+
+            img.header['BITPIX']=-32
+            del img.header['BZERO']
+            del img.header['BSCALE']
+            img.header['OVERSCAN']=f"{get_date} No overscan. Changing datatype to float"
+
+            skip[ne] = False
         else: 
             proc_string+="-"
 
 
-        #.Realizando correcao de BIAS
+        #.BIAS correction
         if ('ZEROCOR' not in img.header) and (master_bias is not None): 
             proc_string+="z"
             img = subtract_bias(img, 
-                        mbias_ccd[ext],
-                        add_keyword={'ZEROCOR': f"{get_date} Zero is {bstr}[{ext}]"})
+                mbias_ccd[ext],
+                add_keyword={'ZEROCOR': f"{get_date} Zero is {bstr}[{ext}]"})
 
             skip[ne] = False
         else:
             proc_string+="-"
 
-        #.Realizando correcao de FLAT
+        #.FLAT FIELD correction
         if ('FLATCOR' not in img.header) and (master_flat is not None):
             proc_string+="f"
             fscl = mflat_ccd[ext].header['FLATNORM']
             img = flat_correct(img, 
-                        mflat_ccd[ext], 
-                        norm_value=1,
-            add_keyword={'FLATCOR': f"{get_date} Flat is {flstr}[{ext}] (norm={fscl:.1f})"})
+                mflat_ccd[ext], 
+                norm_value=1,
+                add_keyword={'FLATCOR': f"{get_date} Flat is {flstr}[{ext}] (norm={fscl:.1f})"})
 
             skip[ne] = False
         else:
             proc_string+="-"
 
-        #.Juntando amplificadores
+        #.Merging amplifiers
         if can_merge:
             proc_string+="m"
-            #..coletando dimensoes e posicao relativa deste amplificador
+            #..collecting size and relative position of this amplifier
             ampos_x, ampos_y = iaf.iraf2python(img.header['DETSEC'])
             ampos_x = (np.array(ampos_x)/bin_x).astype(int) + xgap[ne]
             ampos_y = (np.array(ampos_y)/bin_y).astype(int) + ygap[ne]
             
-            #..escrevendo dados deste amplificador no objeto CCDDdata da imagem final
+            #..writing this amplifier data into the output CCDDATA object
             img_merge[ampos_y[0]:ampos_y[1],ampos_x[0]:ampos_x[1]] = img.data
         else:
             proc_string+="-"
 
-        #.Se alguma operacao foi realizada sobre a imagem, atualizar dados e cabecalho no HDU
+        #.If any operation was done, update data and header in the HDU
         if not skip[ne]: 
             hdul[ext].data = img.data.astype(np.float32)
             hdul[ext].header = img.header
     
-
-    #.Salvando a imagem processada 
+    #.Saving the processed image 
     if can_merge:
         
-        #..preparando o header da imagem combinada
+        #..preparing header of the output image
         if image_exts[0] != 0: 
             hdr = hdul[0].header
             hdr.extend(hdul[1].header, unique=True)
         else: hdr = hdul[1].header
-        #..removendo keywords que nao serao mais necessarias
+        #..removing keywords no longer needed
         keystodel = ['DATASEC', 'CCDSEC', 'AMPSEC', 'DETSEC', 'NEXTEND', 'EXTNAME']
         for keyw in keystodel: del hdr[keyw]
-        #..ajustando keywords para refeletir o novo estado da imagem
+        #..adjusting keywords to the new image format
         hdr['DETSIZE']=f"[1:{imsz_x},1:{imsz_y}]"
         hdr['CCDSIZE']=f"[1:{imsz_x},1:{imsz_y}]"
         hdr.insert('NAXIS', ('NAXIS1', imsz_x, "Axis length"), after=True)
         hdr.insert('NAXIS1', ('NAXIS2', imsz_y, "Axis length"), after=True)   
         hdr.append(('AMPMERGE', f"{get_date} Merged {len(image_exts)} amps"))
 
-        #..construindo o objeto CCDData para armazenar a imagem final
+        #..creating output image CCDDATA object
         img = CCDData(img_merge, meta=hdr, unit='adu')
-        #..escrevendo para o arquivo (overwrite)
+        #..writing to file (overwrite)
         img.write(image_file,hdu_mask=None,hdu_uncertainty=None,overwrite=True)
         
     else:
@@ -177,9 +194,10 @@ def reduce_image_mp(image_file, flat_idx,
                     master_flats_list,
                     merge_amplifiers=True):
     
+    #.selecting the proper 'master_flat' (FILTER) for each science image
     master_flat = master_flats_list[flat_idx]
 
-    #.executando a reducao da imagem
+    #.reducing the image
     reduce_image(image_file, 
                   master_bias = master_bias,
                   master_flat = master_flat,
@@ -192,11 +210,11 @@ def process_bias(ifc,
                  delete_bias=True,
                  multiprocessing=True):
     
-    #.separando imagens de BIAS em uma lista 
+    #.grouping BIAS images into a list 
     bias_ifc = ifc.filter(obstype='BIAS|ZERO', regex_match=True)
     file_list = bias_ifc.files
     
-    #.corrigindo OVERSCAN nas imagens de BIAS
+    #.OVERSCAN correction
     if multiprocessing: 
         with Pool() as pool:
             pool.map(partial(reduce_image, master_bias=None, master_flat=None,
@@ -205,7 +223,7 @@ def process_bias(ifc,
         for file in file_list: 
             reduce_image(file)
 
-    #.combinando imagens de BIAS em um 'master_bias'
+    #.combining BIAS frames into a 'master_bias'
     combine_bias(file_list, delete_images=delete_bias, output=combined_bias, 
                  multiprocessing=multiprocessing)
 
@@ -217,7 +235,7 @@ def combine_bias(image_list,
                  output='master_bias.fits',
                  multiprocessing=True):
     
-    #.tratando excessoes
+    #.aborting if there are no BIAS images or if a 'master_bias' is found
     nbias = len(image_list)
     if (not os.path.isfile(output)):
         if (nbias > 0): 
@@ -227,13 +245,13 @@ def combine_bias(image_list,
         print(f".Using '{os.path.basename(output)}' image found in directory")
         return
 
-    #.criando imagem de saida (a partir da 1a da lista)
+    #.creating output image
     mbias = fits.open(image_list[0])
 
-    #.obtendo extensoes com imagem
+    #.getting image extensions
     image_exts = iaf.image_extensions(mbias, is_hdu=True)
 
-    #.combinando bias (por extensao)
+    #.combining BIAS (per extension)
     if multiprocessing:
         with Pool() as pool:
             result = pool.map(partial(combine_bias_extension, bias_list=image_list), 
@@ -243,17 +261,18 @@ def combine_bias(image_list,
         for ext in image_exts:
             result.append(combine_bias_extension(ext, bias_list=image_list))
     
-    #.colocando as extensoes combinadas na imagem de saida 
+    #.joining combined extensions into the output image
     for res in result:
         ext = res[0]
         mbias[ext].data = res[1].data
         mbias[ext].header = res[1].header
 
-    #.salvando imagem de saida
+    #.saving output image
     mbias[0].header['FILENAME']=output
     mbias.writeto(output, overwrite=True)
     mbias.close()
 
+    #.deleting individual bias frames
     if delete_images: 
         for file in image_list: 
             try: os.remove(file)
@@ -262,25 +281,24 @@ def combine_bias(image_list,
 
 def combine_bias_extension(ext, bias_list):
 
-    #..agrupando as imagens de bias deste amplificador
+    #..grouping BIAS images from this amplifier
     ccd_list = [ CCDData.read(bias_list[j], hdu=ext, unit="adu")
                  for j in np.arange(len(bias_list)) ]
 
-    #..preparando objeto combinador
+    #..preparing combiner object
     comb = Combiner(ccd_list, dtype=np.float32)
-    #..processando opcoes do combinador
     comb.sigma_clipping(low_thresh=3, high_thresh=3, func='median', dev_func='mad_std')
-    #..realizando combinacao
+    #..average combining
     comb_bias = comb.average_combine()
 
-    #..pegando o cabecalho da primeira imagem e atualizando
+    #..creating and updating output header
     comb_bias.header = fits.getheader(bias_list[0], ext=ext)
     for n,imgn in enumerate(bias_list, start=1): 
         fstr = os.path.basename(imgn)
         comb_bias.header.append((f"IMCMB{n:03}", f"{fstr}[{ext}]"))
     comb_bias.header.append(('NCOMBINE', len(ccd_list), '# images combined'))
 
-    #..retornando imagem processada desta extensao
+    #..returning the combined image from this extension
     return (ext, comb_bias)
 
 
@@ -293,30 +311,30 @@ def process_flat(ifc,
 
     combined_flats = combined_flats.split('.fits')[0]
   
-    #.separando imagens de FLAT em uma lista 
+    #.grouping FLAT-FIELD images in a list 
     flat_ifc = ifc.filter(obstype='FLAT|SFLAT|DFLAT', regex_match=True)
     file_list = flat_ifc.files
 
-    #.aplicando correcao de OVERSCAN e BIAS nas imagens de FLAT
+    #.applying OVERSCAN and BIAS corrections
     if multiprocessing: 
-        #..carregando 'master bias' em um buffer de memoria
+        #..loading 'master bias' in a memory buffer
         mbias_ccd = iaf.image_to_memory(master_bias)
-        #..executando a reducao com multiprocessamento
+        #..distributing images reduction to multiple processors
         with Pool() as pool:
             pool.map(partial(reduce_image, master_bias=mbias_ccd, 
                              master_flat=None, shared_memory=True,
                              merge_amplifiers=False), file_list)
-        #..liberando buffers de memoria 
+        #..clearing memory buffers 
         iaf.unlink_memory(mbias_ccd)
     else: 
-        #..carregando imagem 'master bias' em um objeto CCDDATA
+        #..loading 'master bias' in a CCDDATA object
         mbias_ccd = iaf.image_to_ccddata(master_bias)   
-        #..executando a reducao imagem por imagem
+        #..reducing images one-by-one
         for file in file_list: 
             reduce_image(file, master_bias=mbias_ccd, 
                          master_flat=None, merge_amplifiers=False)
 
-    #.combinando FLATS por filtro
+    #.combining FLAT-FIELDS by filter
     filters = iaf.ifc_filters(flat_ifc, filter_keywords=filter_keywords, 
                           obstype_selection='*')
     if isinstance(filter_keywords, str): keywds = filter_keywords.split(',')
@@ -324,21 +342,21 @@ def process_flat(ifc,
 
     for fn,filt in enumerate(filters, start=1):
 
-        #.separando lista de imagens de FLAT neste filtro
+        #.grouping FLAT-FIELDS in this filter
         filt_list = list(flat_ifc.files_filtered(**{keywds[0]: filt}))
         for i in np.arange(1,len(keywds)): 
-            filt_list.append(list(flat_ifc.files_filtered(**{keywds[i]: filt})))
+            filt_list.extend(list(flat_ifc.files_filtered(**{keywds[i]: filt})))
         filt_list = list(filter(None, filt_list))
 
         print(f"Creating '{os.path.splitext(os.path.basename(combined_flats))[0]}"+
             f"{fn}.fits': {len(filt_list)} images ({filt})")
 
-        #.combinando imagens deste filtro em um 'master flat'
+        #.combining this filter FLAT-FIELDS into a 'master flat'
         combine_flat(filt_list, delete_images=delete_flats, 
                      output=f"{combined_flats}{fn}.fits", 
                      multiprocessing=multiprocessing)
 
-    #.atualizando ImageFileCollection
+    #.updating ImageFileCollection
     ifc.refresh()
 
 
@@ -347,16 +365,16 @@ def combine_flat(image_list,
                  output='master_flat.fits', 
                  multiprocessing=True):
 
-    #.criando imagem de saida (a partir da 1a da lista)
+    #.creating output master flat image
     mflat = fits.open(image_list[0])
 
-    #.obtendo extensoes com imagem
+    #.getting image extensions
     image_exts = iaf.image_extensions(mflat, is_hdu=True)
 
-    #.gerando fatores de escala entre os flats da lista
+    #.calculating scaling factors for the flat-fields in the list
     fscales = iaf.flat_scale(image_list, normalize=True)
 
-    #.combinando bias (por extensao)
+    #.combining flat-fields (per extension)
     if multiprocessing:
         with Pool() as pool:
             result = pool.map(partial(combine_flat_extension, flat_list=image_list, 
@@ -367,17 +385,27 @@ def combine_flat(image_list,
             result.append(combine_flat_extension(ext, flat_list=image_list, 
                                                  scaling=fscales))
     
-    #.colocando as extensoes combinadas na imagem de saida 
+    #.joining combined extensions into the output image 
     for res in result:
         ext = res[0]
         mflat[ext].data = res[1].data
         mflat[ext].header = res[1].header
 
-    #.salvando imagem de saida
+    #.saving output image
     mflat[0].header['FILENAME']=output
-    mflat.writeto(output, overwrite=True)
-    mflat.close()
 
+    #..Goodman exception: creating a FLAT-FIELD mask
+    if mflat[0].header['INSTRUME'].find("Goodman") >= 0:
+        mask = np.ma.masked_less(mflat[0].data, 0.5)
+        mask.fill_value = np.nan
+        out = CCDData(mask.filled(), meta=mflat[0].header, mask=mask.mask, unit='adu')
+        out.write(output, hdu_mask='MASK', 
+                  hdu_uncertainty=None, hdu_flags=None, hdu_psf=None)
+    else:
+        mflat.writeto(output, overwrite=True)
+        mflat.close()
+
+    #.deleting individual flat images
     if delete_images: 
         for file in image_list: 
             try: os.remove(file)
@@ -386,23 +414,23 @@ def combine_flat(image_list,
 
 def combine_flat_extension(ext, flat_list, scaling=None):
     
+    #.initializing scale factors
     if scaling is None: fscales = np.full(len(flat_list),1)
     else: fscales = np.array(scaling)
     
-    #.agrupando as imagens de flat deste amplificador
+    #.grouping flat-field images from this amplifier
     ccd_list = [ CCDData.read(flat_list[j], hdu=ext, unit="adu")
                  for j in np.arange(len(flat_list)) ]
-    #.escalonando (manualmente) flats pelo valor mediano
-    # (o metodo comb.sigma_clipping nao funciona se a escala for feita pelo comb.scaling)
+    #.(manually) scaling flats by the supplied factors
+    # (comb.sigma_clipping does not work properly with comb.scaling)
     for k in np.arange(len(flat_list)): ccd_list[k].data /= fscales[k]
-    #.preparando objeto combinador
+    #.preparing combiner object
     comb = Combiner(ccd_list, dtype=np.float32)
-    #.processando opcoes do combinador
     comb.sigma_clipping(low_thresh=2., high_thresh=2., func='median', dev_func='mad_std')
-    #.realizando combinacao
+    #.median combining the images
     comb_flat = comb.median_combine()
 
-    #..pegando o cabecalho da primeira imagem e atualizando
+    #..creating and updating output header
     comb_flat.header = fits.getheader(flat_list[0], ext=ext)
     for n,imgn in enumerate(flat_list, start=1): 
         fstr = os.path.basename(imgn)
@@ -410,7 +438,7 @@ def combine_flat_extension(ext, flat_list, scaling=None):
     comb_flat.header.append(('NCOMBINE', len(ccd_list), '# images combined'))
     comb_flat.header.append(('FLATNORM', fscales[0], '# normalization scale'))
 
-    #..retornando imagem processada desta extensao
+    #..returning the combined image for this extension
     return (ext, comb_flat)
 
 
@@ -422,42 +450,42 @@ def process_images(ifc,
     
     master_flat = master_flat.split('.fits')[0]
 
-    #.identificando 'master flats' presentes na pasta
+    #.identifing 'master flats' in the folder
     mflat_list = np.sort(glob.glob(master_flat+'*.fits'))
-    flat_filters = iaf.image_filters(mflat_list)
+    flat_filters = iaf.image_filters(mflat_list, filter_keywords=filter_keywords)
 
-    #.separando imagens de CIENCIA em uma lista 
+    #.grouping SCIENCE images in a list 
     object_ifc = ifc.filter(obstype='OBJECT', regex_match=True)
     file_list = object_ifc.files
 
-    #.selecionando o 'master flat' correto para cada imagem
+    #.selecting the proper 'master flat' for each image (FILTERS)
     obj_filters = iaf.find_filter(file_list, flat_filters, filter_keywords)
 
-    #.reduzindo imagens de ciencia
+    #.reducing SCIENCE images
     if multiprocessing:
-        #..carregando 'master bias' e 'master flat' em um buffer de memoria
+        #..loading 'master bias' and 'master flat' in a memory buffer
         mbias_ccd = iaf.image_to_memory(master_bias, name='mbias')
         mflat_ccd = [iaf.image_to_memory(flat, name='mflat'+flat.split('.fits')[0][-1]) 
                      for flat in mflat_list]
-        #.executando a reducao com multiprocessamento
+        #..distributing images reduction to multiple processors
         with Pool() as pool:
             pool.starmap(partial(reduce_image_mp, master_bias=mbias_ccd,
                          master_flats_list=mflat_ccd), 
                          zip(file_list,obj_filters))
-        #..liberando buffers de memoria 
+        #..clearing memory buffers 
         iaf.unlink_memory(mbias_ccd)
         for flat in mflat_ccd: iaf.unlink_memory(flat)
     else:
-        #.carregando 'master bias' e 'master flat' em objetos CCDDATA
+        #.loading 'master bias' and 'master flat' in CCDDATA objects
         mbias_ccd = iaf.image_to_ccddata(master_bias)
         mflat_ccd = [iaf.image_to_ccddata(image) for image in mflat_list]
-        #.executando a reducao imagem a imagem
+        #.reducing images one-by-one
         for i,file in enumerate(file_list):
             reduce_image(file, 
                          master_bias=mbias_ccd, 
                          master_flat=mflat_ccd[obj_filters[i]],
                          merge_amplifiers=True)
 
-    #.atualizando ImageFileCollection
+    #.updating ImageFileCollection
     ifc.refresh()
 
