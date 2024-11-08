@@ -1,6 +1,8 @@
+#!/usr/bin/env python3
 from argparse import ArgumentParser
 from ccdproc import ImageFileCollection
-from dataprocessing_functions import process_bias, process_flat, process_images
+from dataprocessing_functions import header_setup, process_bias, process_flat, process_images, reject_cosmicrays, fwhm_estimate
+from astrometry_solve import astrometry_solve
 
 def parse_arguments():
 
@@ -36,6 +38,11 @@ def parse_arguments():
         "--multiprocessing", action="store_true", default=False,
         help="enable splitting image processing over all CPU cores (default: %(default)s)"
     )
+    parser.add_argument(
+        "--instrument", type=str, default="SAMI",
+        help="instrument name designation or configuration file (default: %(default)s)"
+    )
+
     
     args=parser.parse_args()
     
@@ -48,9 +55,10 @@ def parse_arguments():
 
 def data_reduce(folder,
                 filter_keywords=['filter'],
-                summary_keywords=['obstype','ut','ccdsum','airmass','exptime','object'],
+                summary_keywords=['obstype','object','airmass','exptime'],
                 summary_file='observations.log',
                 logfile='data_reduce.log',
+                instrument='SAMI',
                 multiprocessing=False):
     
     #.processing filter keywords
@@ -70,6 +78,10 @@ def data_reduce(folder,
         tab.write(folder+summary_file,
                   format='ascii.fixed_width_two_line',overwrite=True)
 
+    #.configuring HEADERS
+    header_setup(ifc, instrument=instrument,
+                 multiprocessing=multiprocessing)
+
     #.processing BIAS
     process_bias(ifc, 
                  combined_bias=folder+'master_bias.fits', 
@@ -86,6 +98,17 @@ def data_reduce(folder,
                    master_bias=folder+'master_bias.fits', 
                    master_flat=folder+'master_flat.fits', 
                    multiprocessing=multiprocessing)
+    
+    #.solving astrometry
+    astrometry_solve(ifc, catalog='I/350', cat_magnitude='Gmag',
+                     cat_constraints={'Gmag': '< 20.5'},
+                     multiprocessing=multiprocessing)
+    
+    #.removing cosmic rays 
+    reject_cosmicrays(ifc)
+
+    #.estimating FWHM 
+    fwhm_estimate(ifc, multiprocessing=multiprocessing)
 
 
 #.Initializing main function from the command line
@@ -97,5 +120,5 @@ if __name__ == '__main__':
                 summary_keywords=args.summary_keywords,
                 summary_file=args.summary_file,
                 logfile=args.logfile,
-                multiprocessing=args.multiprocessing)
-    
+                multiprocessing=args.multiprocessing,
+                instrument=args.instrument)

@@ -3,16 +3,156 @@ from datetime import datetime
 import numpy as np
 from astropy.io import fits
 from astropy.nddata import CCDData
+from astropy.coordinates import Angle
+from astropy.time import Time
+from astropy import units as u
+from astropy.table import vstack
+from photutils.detection import DAOStarFinder
+from scipy.optimize import curve_fit
 from functools import partial
 from multiprocessing import Pool
 from multiprocessing.shared_memory import SharedMemory
-from ccdproc import subtract_overscan, trim_image, subtract_bias, flat_correct, Combiner
+from ccdproc import ImageFileCollection, subtract_overscan, trim_image, subtract_bias, flat_correct, cosmicray_lacosmic, Combiner
+
 import imageauxiliary_functions as iaf
 
 import warnings
-from astropy.wcs.wcs import FITSFixedWarning
-warnings.simplefilter('ignore', category=FITSFixedWarning)
-warnings.simplefilter('ignore', category=UserWarning)
+from photutils.detection.daofinder import NoDetectionsWarning
+from scipy.optimize import OptimizeWarning
+from ccdproc.image_collection import AstropyUserWarning
+
+
+def header_setup(dataset, instrument='SAMI', multiprocessing=False):
+
+    #.If input dataset is a folder, expand it into a ImageFileCollection
+    if isinstance(dataset,str): 
+        ifc = ImageFileCollection(dataset, ext=0,
+         keywords=['obstype','ut','ccdsum','airmass','exptime','object'],
+         glob_exclude="*master*.fits, bpm*.fits", glob_include="*.fits")
+        
+    #.Otherwise the input dataset is already a ImageFileCollection
+    else: ifc = dataset
+    image_list = ifc.files_filtered(include_path=True)
+
+    if multiprocessing:
+        with Pool() as pool:
+            pool.map(partial(header_image, instrument=instrument), 
+                     image_list)
+
+    else: 
+        for file in image_list:
+            header_image(file, instrument=instrument)
+    return
+
+
+def header_image(file, instrument='SAMI'):
+
+    hdul = fits.open(file, mode='update')
+    image_exts = iaf.image_extensions(hdul, is_hdu=True)
+    for ext in image_exts:
+        hdr = hdul[ext].header
+        hdr = header_remove_duplicate(hdr)
+        hdr = header_init(hdr, instrument=instrument)
+        hdul[ext].header = hdr
+    hdul.close()
+
+
+def header_remove_duplicate(header, 
+                            duplicated_keywords=None, 
+                            allowed_duplicates = ('COMMENT', 'HISTORY', 'HIERARCH')):
+
+    if duplicated_keywords is None:
+
+        uniq_keywords = []
+        add_to_keywords = uniq_keywords.append
+
+        header_keywords = list(header.keys())
+        for keyw in header_keywords:
+
+            if (keyw in uniq_keywords) and (keyw not in allowed_duplicates):
+                header.remove(keyw)
+            else:
+                add_to_keywords(keyw)
+
+    else: 
+        for keyw in duplicated_keywords:
+            header.remove(keyw)
+
+    return header
+
+
+def header_init(header, instrument='SAMI'):
+
+    header.set("CTYPE1", "RA---TAN", "Coordinate type")
+    header.set("CTYPE2", "DEC--TAN", "Coordinate type")
+    header.set("RADESYSa", "FK5", "Default coordinate system", before="CTYPE1")
+    header.set("CUNIT2", "deg", "Coordinate unit", after="CTYPE1")
+    header.set("CUNIT1", "deg", "Coordinate unit", after="CTYPE1")
+    header.set("EQUINOX", 2000., "Equinox of WCS")
+
+    if "RADECSYS"in header: del header["RADECSYS"]
+    if "WCSASTRM" in header: del header["WCSASTRM"]
+    if "RADECEQ" in header: del header["RADECEQ"]
+    if "WAT0_001" in header: del header["WAT0_001"]
+    if "WAT1_001" in header: del header["WAT1_*"]
+    if "WAT2_001" in header: del header["WAT2_*"]
+    if "PC1_1" in header: del header["PC1_*"]
+    if "PC2_1" in header: del header["PC2_*"]
+
+    if instrument == "SAMI":
+        ccdsum = np.array([ float(bin) for bin in header['CCDSUM'].split() ])
+        point_ra = Angle(header['TELRA'], unit = u.hourangle).value*15
+        point_dec = Angle(header['TELDEC'], unit = u.degree).value
+        crpix1 = 2048/ccdsum[0]
+        crpix2 = 2056/ccdsum[1]
+        CDval = 1.25e-05*ccdsum
+        camrot = header['ROTOFFS']
+        header["GAIN"] = 2.1
+        header["RDNOISE"] = 4.7
+        header["SATURATE"] = 0.8*65536
+        header.set("SIP_FILE",'SAMI_SIP_coefficients.txt','Higher order WCS corrections',
+                   before='CDELT1')
+
+    elif instrument == "Goodman":
+        if "PG0_0" in header: del header["PG*"]
+        if "N_PRM_0" in header: del header["N_PRM*"]
+        ccdsum = np.array([ float(bin) for bin in header['CCDSUM'].split() ])
+        point_ra = Angle(header['RA'], unit = u.hourangle).value*15
+        point_dec = Angle(header['DEC'], unit = u.degree).value
+        crpix1 = 1548/ccdsum[0]
+        crpix2 = 1548/ccdsum[1]
+        CDval = 4.012792e-05*ccdsum
+        camrot = header['POSANGLE']
+        header = iaf.goodman_saturate(header)
+        header.set('MJD-OBS', Time(header['DATE-OBS']).mjd,"MDJ at start of observation")
+        
+    elif instrument == "SOI":
+        ccdsum = np.array([ float(bin) for bin in header['CCDSUM'].split() ])
+        point_ra = Angle(header['TELRA'], unit = u.hourangle).value*15
+        point_dec = Angle(header['TELDEC'], unit = u.degree).value
+        crpix1 = (2048+102)/ccdsum[0]
+        crpix2 = 2048/ccdsum[1]
+        CDval = 2.1306e-05*ccdsum
+        camrot = header['DECPANGL']
+        header["GAIN"] = 2.2
+        header["RDNOISE"] = 4.7
+        header["SATURATE"] = 55000
+
+    header["CDELT1"] = CDval[0]
+    header["CDELT2"] = CDval[1]
+    header["CRVAL1"] = point_ra
+    header["CRVAL2"] = point_dec
+    header["CRPIX1"] = crpix1
+    header["CRPIX2"] = crpix2
+
+    cost = np.cos(camrot * np.pi/180)
+    sent = np.sin(camrot * np.pi/180)
+    header["CD1_1"] = CDval[0] * cost
+    header["CD1_2"] = abs(CDval[1]) * np.sign(CDval[0]) * sent
+    header["CD2_1"] = -abs(CDval[0]) * np.sign(CDval[1]) * sent
+    header["CD2_2"] = CDval[1] * cost
+
+    return header
 
 
 def reduce_image(image_file, 
@@ -27,6 +167,8 @@ def reduce_image(image_file,
 
     get_date = datetime.now().strftime("%b %d %Y %H:%M")
     fstr = os.path.basename(image_file)
+    
+    #.setting instrument
     inst = hdul[0].header['INSTRUME']
     
     #..preparing master bias data
@@ -210,7 +352,17 @@ def process_bias(ifc,
                  delete_bias=True,
                  multiprocessing=True):
     
+    #.skipping if master bias is found in folder
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', AstropyUserWarning)
+        try: 
+            bias_ifc = ifc.filter(obstype='BIAS|ZERO', regex_match=True)
+        except AstropyUserWarning:
+            print(f".ABORTING 'master bias' creation: no BIAS images found")
+            return
+
     #.grouping BIAS images into a list 
+    file_list = bias_ifc.files
     bias_ifc = ifc.filter(obstype='BIAS|ZERO', regex_match=True)
     file_list = bias_ifc.files
     
@@ -284,7 +436,7 @@ def combine_bias_extension(ext, bias_list):
     #..grouping BIAS images from this amplifier
     ccd_list = [ CCDData.read(bias_list[j], hdu=ext, unit="adu")
                  for j in np.arange(len(bias_list)) ]
-
+    
     #..preparing combiner object
     comb = Combiner(ccd_list, dtype=np.float32)
     comb.sigma_clipping(low_thresh=3, high_thresh=3, func='median', dev_func='mad_std')
@@ -310,7 +462,16 @@ def process_flat(ifc,
                  multiprocessing=True):
 
     combined_flats = combined_flats.split('.fits')[0]
-  
+
+    #.skipping if master flats are found in folder
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', AstropyUserWarning)
+        try: 
+            flat_ifc = ifc.filter(obstype='FLAT|SFLAT|DFLAT', regex_match=True)
+        except AstropyUserWarning:
+            print(f".ABORTING 'master flat' creation: no FLAT images found")
+            return
+
     #.grouping FLAT-FIELD images in a list 
     flat_ifc = ifc.filter(obstype='FLAT|SFLAT|DFLAT', regex_match=True)
     file_list = flat_ifc.files
@@ -488,4 +649,244 @@ def process_images(ifc,
 
     #.updating ImageFileCollection
     ifc.refresh()
+
+
+def reject_cosmicrays(dataset, **kwargs):
+    
+    #.If input dataset is a folder, expand it into a ImageFileCollection
+    if isinstance(dataset,str): 
+        ifc = ImageFileCollection(dataset, ext=0,
+         keywords=['obstype','ut','ccdsum','airmass','exptime','object'],
+         glob_exclude="*master*.fits, bpm*.fits", glob_include="*.fits")
+    
+    #.Otherwise the input dataset is already a ImageFileCollection
+    else: ifc = dataset
+
+    #.grouping SCIENCE images in a list 
+    obj_ifc = ifc.filter(obstype='OBJECT', regex_match=True)
+    obj_list = obj_ifc.files
+
+    #.Looping over image list to clean cosmic rays 
+    for file in obj_list: 
+        print(f".Cleaning cosmic rays: {file}", end=" - ")
+        lacosmic_image(file)
+        
+
+def lacosmic_image(image, **kwargs):
+
+    #.If input image is a string, treat it as an image file path
+    if isinstance(image, str): 
+        hdul = fits.open(image, mode='update')
+    #.else treat it as an HDU
+    else: 
+        hdul = image
+
+    img = CCDData(hdul[0].data, meta=hdul[0].header, unit="adu")
+
+    #.Abort if the image has already been cleaned from cosmic rays
+    if ('LACOSMIC' in img.header): 
+        print('Already cleaned')
+        return
+
+    #.Expanding kwargs
+    if 'sigclip' not in kwargs: kwargs['sigclip'] = 6
+    if 'sigfrac' not in kwargs: kwargs['sigfrac'] = 0.25
+    if 'objlim' not in kwargs:  kwargs['objlim'] = 5
+    if 'fsmode' not in kwargs:  kwargs['fsmode'] = 'median'
+    if 'niter' not in kwargs:
+        if ('EXPTIME' in img.header): 
+            expt = img.header['EXPTIME']
+            kwargs['niter'] = 1+(expt>=100)+(expt>=300)
+        else: kwargs['niter'] = 2
+
+    #.Getting essential info from header
+    get_date = datetime.now().strftime("%b %d %Y %H:%M")
+    if ('FWHM' in img.header): fwhm = img.header['FWHM']
+    else: fwhm = 10.
+    
+    #.Cleaning cosmic rays with LACOSMIC
+    img_cln = cosmicray_lacosmic( img, gain_apply=False, 
+                                    gain=img.header['GAIN'],
+                                    readnoise=img.header['RDNOISE'],
+                                    satlevel=img.header['SATURATE'],
+                                    verbose=False, **kwargs )
+
+    #.Updating header and saving processed image (overwrite)
+    print(f"{kwargs['niter']} passes")
+    img_cln.header.set('LACOSMIC', 
+        f"{get_date} {kwargs['fsmode']} Nit={kwargs['niter']} sigclip={kwargs['sigclip']} "+
+        f"sigfrac={kwargs['sigfrac']} objlim={kwargs['objlim']}")
+
+    hdul[0].data = img_cln.data
+    hdul[0].header = img_cln.header
+    hdul.close()
+
+
+def fwhm_estimate(dataset, multiprocessing=False, **kwargs):
+
+    #.If input dataset is a folder, expand it into a ImageFileCollection
+    if isinstance(dataset,str): 
+        ifc = ImageFileCollection(dataset, ext=0,
+         keywords=['obstype','ut','ccdsum','airmass','exptime','object'],
+         glob_exclude="*master*.fits, bpm*.fits", glob_include="*.fits")
+    
+    #.Otherwise the input dataset is already a ImageFileCollection
+    else: ifc = dataset
+
+    #.grouping SCIENCE images in a list 
+    obj_ifc = ifc.filter(obstype='OBJECT', regex_match=True)
+    obj_list = obj_ifc.files
+
+    #.estimating FHWM for each image
+    if multiprocessing: 
+        with Pool() as pool:
+            pool.map(partial(fwhm_image, **kwargs), obj_list)
+    else: 
+        for file in obj_list: 
+            fwhm_image(file, **kwargs)
+
+
+def fwhm_image(file, image_area=0.33, is_hdu=False, min_fwhm=1.5, **kwargs):
+
+    if is_hdu: hdul=file
+    else: hdul = fits.open(file, mode='update')
+
+    print(f".Moffat fitting {file}:", end=" ")
+
+    #.aborting if FWHM is found in header
+    ifwhm = hdul[0].header.get('FWHM')
+    if ifwhm:
+        print(f".FWHM found in header = {ifwhm:.2f}")
+        return
+
+    #.looping over the image extensions
+    image_indices = iaf.image_extensions(file, is_hdu=is_hdu)
+    n_ext = len(image_indices)
+    table = None
+    for ext in image_indices:
+    
+    #.initializing arguments
+        img = hdul[ext].data
+        hdr = hdul[ext].header
+
+        if n_ext == 1:
+            imsz = img.shape
+            border = (1-image_area)/2
+            data = img[round(border*imsz[0]):round((1-border)*imsz[0]),
+                       round(border*imsz[1]):round((1-border)*imsz[1])]
+        else: data = img
+    
+    #.getting header keywords
+        if 'saturation' not in kwargs:
+            kwargs['saturation'] = hdr.get('SATURATE', default=52430)
+        if 'gain' not in kwargs:
+            kwargs['gain'] = hdr.get('GAIN', default=1)
+
+    #.calculating FWHM for this extension stars
+        tab = fwhm_fit(data, **kwargs)
+    #..stacking tables from multiple extensions
+        if tab is None: continue
+        elif table is None: table = tab
+        else: table = vstack([table,tab], metadata_conflicts='silent')
+        
+    #.if there are enough stars, skip to the end 
+        good_data = np.isfinite(table['fwhm']) & (table['fwhm'] > min_fwhm)
+        n_good = np.sum(good_data)
+        if n_good >= 10: break
+
+    #.getting best value for FWHM and storing in header
+    if table is None: n_good = 0
+    
+    if n_good > 0:
+        fwhm = np.median(table['fwhm'][good_data])
+        beta = np.median(table['beta'][good_data])
+    else: fwhm, beta = 0, 0
+    print(f"median value FWHM = {fwhm} ({n_good} stars)")
+
+    for ext in np.append(image_indices, 0):
+        hdul[ext].header.set("FWHM",fwhm,f"Moffat FWHM (median of {n_good} values)")
+        hdul[ext].header.set("BETA",beta,f"Moffat Beta (median of {n_good} values)")
+        hdul[ext].header.set("BACK",table.meta['back'],f"Median background value")
+        hdul[ext].header.set("BACK_RMS",table.meta['back_rms'],f"Background std-dev (from MAD)")
+
+    #.returning
+    if is_hdu: return hdul
+    else: 
+        hdul.close()
+
+
+def fwhm_fit(image, n_max=50, saturation=52430., gain=1):
+
+    initial_fwhm = 10
+    half_box = initial_fwhm
+
+    #.Using sigma-clipping to model the background
+    # (actually, replaced by simple median and MAD for speed)
+    back_median = np.nanmedian(image)
+    back_std = 1.4826*np.nanmedian(np.abs(image-back_median))
+
+    #.Detecting sources using IRAFStarfinder method
+    # (actually, DAOFinder is faster than IRAFStarFinder)
+    # (find_peaks is even faster, but unreliable)
+    daofinder = DAOStarFinder(3*back_std, 1.5*initial_fwhm,
+                            roundlo=-2.0, roundhi=2.0, sharplo=0.01, sharphi=10.0,
+                            brightest=n_max, exclude_border=False, peakmax=saturation)
+    
+    #..catching zero objects warning and aborting
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", category=NoDetectionsWarning)
+        try:
+            tab = daofinder.find_stars(image[half_box:-half_box,half_box:-half_box]-back_median)
+        except NoDetectionsWarning:
+            return None
+    
+    tab['xcentroid'] += half_box
+    tab['ycentroid'] += half_box
+    tab.sort('mag')
+
+    #.Building a global pixel grid with 1-FWHM size
+    pos_xy = np.arange(-half_box, half_box, 1)
+    global_x, global_y = np.meshgrid(pos_xy, pos_xy)
+    params, parerr = np.full((n_max,5), np.nan), np.full((n_max,5), np.nan)
+
+    for i,row in enumerate(tab):
+
+        #.Adjusting grid for this star
+        xcen, ycen = round(row['xcentroid']), round(row['ycentroid'])
+        grid_x = global_x + xcen
+        grid_y = global_y + ycen
+
+        #.Fitting 2D model with curve_fit
+        datax = np.vstack((grid_x.ravel(),grid_y.ravel())).astype(float)
+        datay = image[ycen-half_box:ycen+half_box, xcen-half_box:xcen+half_box].ravel()-back_median
+        datay = datay.clip(min=1)
+        erroy = np.sqrt(datay/gain)
+        p0 = [row['peak'],xcen,ycen,10,3.5]
+        #..error cactching the fitting
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", category=RuntimeWarning)
+            warnings.filterwarnings("error", category=OptimizeWarning)
+            try:
+                popt, pcov = curve_fit(iaf.moffat2d, datax[:,:], datay[:],p0=p0,
+                                    sigma=erroy[:], absolute_sigma=True)
+            except (RuntimeError, RuntimeWarning, OptimizeWarning):
+                continue
+
+        #..gathering resulting coefficients
+        perr = np.sqrt(np.diag(pcov))
+        params[i,:] = popt
+        parerr[i,:] = perr/popt
+    
+    #.composing output table
+    mask = (parerr[:,3] >= 1) | (parerr[:,4] >= 1) | (params[:,4] <= 1)
+    params[mask,:] = np.nan
+    parerr[mask,:] = np.nan
+
+    tab['fwhm'] = 2*abs(params[:,3])*np.sqrt(2**(1/params[:,4])-1)
+    tab['beta'] = params[:,4]
+    tab.meta = {'back': back_median, 'back_rms': back_std}
+    tab.remove_column('id')
+
+    return tab
+
 

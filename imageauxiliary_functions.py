@@ -214,6 +214,15 @@ def iraf2python(my_string):
     return x, y
 
 
+def goodman_saturate(header):
+    ccdsum = np.array([ float(bin) for bin in header['CCDSUM'].split() ])
+    gain = header['GAIN']
+    well_sat = np.prod(ccdsum)*0.8*205000/gain
+    adc_sat = 0.8*65535
+    header['SATURATE'] = np.min([well_sat, adc_sat])
+    return(header)
+
+
 def image_to_memory(input, name='shm'):
 
     if isinstance(input,str): hdul = fits.open(input)
@@ -283,3 +292,43 @@ def unlink_memory(shm_dict):
         mem_block = SharedMemory(name=mem_dict['buffer']) 
         mem_block.close()
         mem_block.unlink()
+
+
+def moffat2d(xy,I,x0,y0,a,b):
+    """
+    Definition of the two-dimensional Moffat intensity profile:
+    
+    f(r) = I * ( 1 + ((x-x0)/a)^2 + ((y-y0)/a)^2 )^-b
+
+    where   x, y are the data pixel coordinates
+            f(r) is the data intensity at each coordinate 
+            x0, y0 are the source peak (centre) pixel coordinates
+            I is the central intensity.
+                for PDF normalization: I = (b-1)/(pi*a^2)
+            a is the Moffat characteristic radius
+                FWHM = 2.a.sqrt(2^(1/b) - 1)   - seeing
+                r_50 = a.sqrt(2^(1/(b-1)) -1)  - half flux radius
+            b is the Moffat characteristic exponent (~2.5-4.0)
+
+    Arguments
+    ---------
+        (x,y) : 2D-array (2 x N)
+            X, Y pixel coordinates of the source data
+        x0, y0: float
+            souce peak (centre) pixel coordinates
+        I : float
+            maximum intensity (central value) of the profile
+        a : float
+            Moffat characteristic radius of the profile.
+        b : float
+            Moffat characteristic exponent. For stellar objects it usually 
+            falls in the 2.5-4.0 range. 
+
+    Returns
+    -------
+        intensities : 1D-array
+            the program will return a array of the calculated intensities at
+            each supplied radius            
+    """
+    x, y = xy
+    return I*( 1 + ((x-x0)/a)**2 + ((y-y0)/a)**2 )**(-b)

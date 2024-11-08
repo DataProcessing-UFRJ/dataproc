@@ -1,0 +1,32 @@
+# 05/10/24-17:45 -- SIP Polynomial fittting
+# Image: SO2018B-009.155.fits (1261 sources)
+A_ORDER,  5,SIP X-polynomial order; detector to sky
+A_0_0,  -5.821061e+00,   1.09% relative coef. uncertainty
+A_0_2,  -1.211044e-05,   4.13% relative coef. uncertainty
+A_0_3,  -1.140195e-08,   5.03% relative coef. uncertainty
+A_0_4,  -2.621821e-12,   6.48% relative coef. uncertainty
+A_1_2,  +9.214386e-09,   8.19% relative coef. uncertainty
+A_1_3,  +8.251594e-12,   9.50% relative coef. uncertainty
+A_1_4,  +1.916899e-15,  10.66% relative coef. uncertainty
+A_2_0,  +7.447254e-06,   2.83% relative coef. uncertainty
+A_2_1,  +8.079116e-09,   7.97% relative coef. uncertainty
+A_2_2,  +3.512297e-12,  10.69% relative coef. uncertainty
+A_3_0,  -1.021378e-09,  10.79% relative coef. uncertainty
+A_3_1,  -2.645060e-12,  10.42% relative coef. uncertainty
+A_3_2,  -1.179300e-15,  12.64% relative coef. uncertainty
+B_ORDER,  5,SIP Y-polynomial order; detector to sky
+B_0_0,  +1.398768e+00,   4.82% relative coef. uncertainty
+B_0_3,  +4.947153e-09,   1.88% relative coef. uncertainty
+B_0_4,  +1.124664e-12,   3.91% relative coef. uncertainty
+B_1_1,  -1.424615e-05,   4.56% relative coef. uncertainty
+B_1_2,  -3.028255e-09,   9.12% relative coef. uncertainty
+B_2_0,  +2.863887e-05,   3.79% relative coef. uncertainty
+B_2_1,  +1.771949e-08,   7.43% relative coef. uncertainty
+B_2_2,  +1.282045e-12,  12.05% relative coef. uncertainty
+B_3_0,  -3.570684e-08,   5.81% relative coef. uncertainty
+B_3_1,  -1.032371e-11,  10.58% relative coef. uncertainty
+B_4_0,  +1.547907e-11,   8.91% relative coef. uncertainty
+B_4_1,  +2.387171e-15,  11.79% relative coef. uncertainty
+B_5_0,  -2.441542e-15,  12.60% relative coef. uncertainty
+RMSE_A,  0.470199,SIP X-RMSE residuals (pixels) - 1261 sources
+RMSE_B,  0.571313,SIP Y-RMSE residuals (pixels) - 1261 sources
