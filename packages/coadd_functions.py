@@ -1,21 +1,22 @@
 import sys, os, re
 import numpy as np
+import json
 from ccdproc import ImageFileCollection
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.nddata import NDData,Cutout2D
 from astropy.wcs import WCS
 import astropy.units as u
+from functools import partial
+from multiprocessing import Pool
+from parallelbar import progress_starmap, progress_map
 from reproject.mosaicking import find_optimal_celestial_wcs, reproject_and_coadd
 from reproject import reproject_interp, reproject_exact, reproject_adaptive
-from imageauxiliary_functions import get_filter_label
-import json
+
+from packages.imageauxiliary_functions import get_filter_label
 
 
 def table_expr_parser(column_expression, column_names, table_name='table'):
-
-    column_expression = column_expression.lower()
-    column_names = [coln.lower() for coln in column_names]
 
     #.Splitting expression using common operators
     split_expr = re.split(r'\s+[+\-<>=!&|]+\s+', column_expression)
@@ -64,11 +65,11 @@ def table_expr_keywords(column_expression):
     return list(set(expression_keywords)), list(set(possible_keywords))
 
 
-def validate_header_keywords(header, keyword_list, exception_list=['offset','sequence']):
+def validate_header_keywords(header,keyword_list):
 
     valid = [keyw in header for keyw in keyword_list]
 
-    for exception in exception_list:
+    for exception in ['offset','sequence']:
         if exception in keyword_list: 
             valid[keyword_list.index(exception)] = True
 
@@ -94,9 +95,22 @@ def create_image_sets(dataset,
                       coordinate_keywords = ['ra','dec'],
                       imsets_file='imsets.json'):
     
-    ifc_keywords = ['obstype','object','airmass','exptime']
+    #.Checking if the Image sets file (the output) already exists
+    if isinstance(dataset,str):
+        imsets_path = os.path.join(dataset,imsets_file)
+    else: 
+        imsets_path = os.path.join(dataset.location,imsets_file)
+
+    if os.path.isfile(imsets_path): 
+        print(f".Image sets file found: {imsets_path}")
+        with open(imsets_path,'r') as input_file:
+            return json.load(input_file)
+    else:         
+        print(f".Creating Image sets file: {imsets_path}")
+
 
     #.Processing input for demanded keywords
+    ifc_keywords = ['obstype','object','airmass','exptime']
     group_keywords = group_images_by.copy()
 
     separate_keywords, possible_keywords = table_expr_keywords(separate_group_by)
@@ -112,7 +126,9 @@ def create_image_sets(dataset,
     ifc_keywords = list(set(ifc_keywords))
     if isinstance(dataset,str): 
         ifc = ImageFileCollection(dataset, ext=0, keywords=ifc_keywords,
-            glob_exclude="*master*.fits", glob_include="*.fits")    
+            glob_exclude="*master*.fits", glob_include="*.fits")
+        
+    else: ifc = dataset    
 
     #.Validating demanded keywords in header
     header = next(ifc.headers())
@@ -128,6 +144,7 @@ def create_image_sets(dataset,
     
     #.Generating main images table
     table = ifc.summary
+    table['file'] = [os.path.join(ifc.location,file) for file in table['file']]
 
     #..adding sequence counter
     obj_list = np.array(table['object'])
@@ -151,8 +168,8 @@ def create_image_sets(dataset,
         #..calculating offsets for images in each group
         if grouped_sizes[i] > 1:
             coords = SkyCoord(ra= group[coordinate_keywords[0]], 
-                            dec=group[coordinate_keywords[1]], 
-                            unit=(u.hour,u.degree), frame='fk5')
+                              dec=group[coordinate_keywords[1]], 
+                              unit=(u.hour,u.degree), frame='fk5')
             group['offset'] = np.round(coords[0].separation(coords).value, 7)
 
         #..separating groups by keyword expressions
@@ -174,14 +191,14 @@ def create_image_sets(dataset,
                 imset_id+= '_'+get_filter_label(group[0][filter_keywords])
                 seq = 1
                 while imset_id+str(seq) in imsets: seq+=1
-                imset_dict['output'] = imset_id+str(seq)+'.fits'
+                imset_dict['output'] = str(os.path.join(ifc.location,imset_id+str(seq)+'.fits'))
 
                 #....adding this imset to output dictionary
                 imsets[imset_id+str(seq)] = imset_dict
 
     #----------------------------------------------------------------------------------
     #.Saving resulting image sets to output file (.json)
-    with open(os.path.join(ifc.location, imsets_file),'w') as output_file:
+    with open(imsets_path,'w') as output_file:
         json.dump(imsets, output_file, indent=4, cls=NpEncoder)
         
     return imsets
@@ -243,6 +260,13 @@ def coadd_images(images_list, output_file,
                  weight_keyword='1/FWHM**2',
                  output_maps=False,
                  auto_rotate=True):
+
+    #.Checking if output image already exists
+    if os.path.isfile(output_file): 
+        print(f"  {output_file} already exists")
+        return
+    else:
+        print(f".coadding {[os.path.basename(img) for img in images_list]} to {output_file}")
 
     #.Checking scale and weight keyword expressions
     n_images = len(images_list)
@@ -436,14 +460,13 @@ def coadd_imageset(imageset, multiprocessing=True, **kwargs):
 
     if multiprocessing:
         # result = progress_starmap(partial(coadd_images, **kwargs), list(zip(setimages,outimages)), 
-        #                           chunk_size=1, n_cpu=24)
-        with Pool() as pool:
+        #                           chunk_size=1, n_cpu=16)
+        with Pool(16) as pool:
             pool.starmap(partial(coadd_images, **kwargs), zip(setimages,outimages),
                          chunksize=1)
 
     else:
         for imglist,outimage in zip(setimages,outimages):
-            print(f"{outimage}:{imglist}")
             coadd_images(imglist, outimage, **kwargs)
 
 

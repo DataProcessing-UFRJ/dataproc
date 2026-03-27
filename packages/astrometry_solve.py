@@ -1,7 +1,8 @@
 from ccdproc import ImageFileCollection
 from functools import partial
 from multiprocessing import Pool
-from wcs_functions import wcs_solve
+
+from packages.wcs_functions import wcs_solve
 
 def astrometry_solve(dataset, multiprocessing=False, **kwargs):
 

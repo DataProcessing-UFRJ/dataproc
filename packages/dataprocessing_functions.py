@@ -16,7 +16,7 @@ from multiprocessing import Pool
 from multiprocessing.shared_memory import SharedMemory
 from ccdproc import ImageFileCollection, subtract_overscan, trim_image, subtract_bias, flat_correct, cosmicray_lacosmic, Combiner
 
-import imageauxiliary_functions as iaf
+import packages.imageauxiliary_functions as iaf
 
 import warnings
 from photutils.detection.daofinder import NoDetectionsWarning

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
+from os import path
 from argparse import ArgumentParser
 from ccdproc import ImageFileCollection
-from dataprocessing_functions import acquisition_remove, header_setup, process_bias, process_flat, process_images, reject_cosmicrays, fwhm_estimate
-from astrometry_solve import astrometry_solve
-from os import path
+
+from packages.dataprocessing_functions import acquisition_remove, header_setup, process_bias, process_flat, process_images, reject_cosmicrays, fwhm_estimate
+from packages.astrometry_solve import astrometry_solve
 
 def parse_arguments():
 
