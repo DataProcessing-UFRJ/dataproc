@@ -463,7 +463,7 @@ dependencies:
   - typing_extensions=4.15.0=pyhcf101f3_0
   - typing_utils=0.1.0=pyhd8ed1ab_1
   - tzdata=2025c=hc9c84f9_1
-  - uncertainties=3.2.4=pyhd8ed1ab_0
+  - uncertainties=3.2.3
   - uncompresspy=0.4.1=pyhd8ed1ab_0
   - unicodedata2=17.0.1=py312h4c3975b_0
   - uri-template=1.3.0=pyhd8ed1ab_1
@@ -519,4 +519,3 @@ dependencies:
       - fast-histogram==0.14
       - scikit-learn==1.8.0
       - tdqm==0.0.1
-prefix: /home/kicage/.miniforge3/envs/dataproc-env12

@@ -123,6 +123,8 @@ def data_reduce(folder,
                   formats={'fwhm':'.1f','beta':'.2f','ellip':'.2f','angle':'.0f',
                            'ang_dev':'.0f','back':'.1f','back_rms':'.1f'})
 
+    #.grouping image sets for image stacking
+    
 
 #.Initializing main function from the command line
 if __name__ == '__main__':
