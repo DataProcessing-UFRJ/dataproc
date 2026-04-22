@@ -263,10 +263,10 @@ def coadd_images(images_list, output_file,
 
     #.Checking if output image already exists
     if os.path.isfile(output_file): 
-        print(f"  {output_file} already exists")
+        print(f"  {output_file} already exists \n")
         return
     else:
-        print(f".coadding {[os.path.basename(img) for img in images_list]} to {output_file}")
+        print(f".coadding {[os.path.basename(img) for img in images_list]} to {output_file} \n")
 
     #.Checking scale and weight keyword expressions
     n_images = len(images_list)
@@ -457,6 +457,12 @@ def coadd_images(images_list, output_file,
 
 
 def coadd_imageset(imageset, multiprocessing=True, **kwargs):
+
+    if isinstance(imageset,str): 
+        if os.path.isfile(imageset): 
+            print(f".Image sets file found: {imageset}")
+            with open(imageset,'r') as input_file:
+                imageset = json.load(input_file)
 
     setimages = [setdict['images'] for _,setdict in imageset.items()]
     outimages = [setdict['output'] for _,setdict in imageset.items()]
