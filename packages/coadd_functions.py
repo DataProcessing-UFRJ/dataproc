@@ -383,10 +383,14 @@ def coadd_images(images_list, output_file,
                 comment='exposure time of the original image')
     out_header.set('ori_satu', out_header['saturate'], after='saturate',
                 comment='saturation level of the original image')
+    out_header.set('ori_rdn', out_header['rdnoise'], after='rdnoise',
+                comment='readout noise of the original image')
+
     out_header.set('exptime', 1.)
     out_header.set('extname', 'MOSAIC_DATA')
     out_header.set('ncombine', n_images)
-    for i,file in enumerate(images_list): out_header.set(f'imcmb{i:0>3.0f}', file)
+    for i,file in enumerate(images_list): 
+        out_header.set(f'imcmb{i:0>3.0f}', os.path.basename(file))
     out_header.update(wcs_mosaic.to_header(relax=True))
 
     #.Combining images into output mosaics
@@ -402,7 +406,6 @@ def coadd_images(images_list, output_file,
                                         blank_pixel_value=np.nan)
 
         trimmed_img, _ = trim_image(gain_mosaic, header=out_header.copy())
-        # trimmed_img, trim_header = gain_mosaic, out_header
         output_hdus.append(fits.ImageHDU(trimmed_img.astype(np.single), name='effective_gain', 
                                         do_not_scale_image_data=True, uint=False))
 
@@ -416,17 +419,18 @@ def coadd_images(images_list, output_file,
                                         blank_pixel_value=np.nan)   
 
         trimmed_img, _ = trim_image(sat_mosaic, header=out_header.copy())
-        # trimmed_img, trim_header = sat_mosaic, out_header
         output_hdus.append(fits.ImageHDU(trimmed_img.astype(np.single), name='saturation', 
                                         do_not_scale_image_data=True, uint=False))
 
         out_header.set('gain', 1.)
         out_header.set('saturate', np.nanmedian(sat_mosaic).astype(np.single))
+        out_header.set('rdnoise', np.single(out_header['rdnoise']/out_header['ori_expt']))
         out_footprint = sat_mosaic
 
     else: 
-        out_header['gain'] = np.float32(header['gain']*n_images)
-        out_header['saturate'] = np.float32(out_header['saturate']/out_header['ori_expt'])
+        out_header.set('gain', np.single(header['gain']*n_images))
+        out_header.set('saturate', np.single(out_header['saturate']/out_header['ori_expt']))
+        out_header.set('rdnoise', np.single(out_header['rdnoise']/out_header['ori_expt']))
         out_footprint = None
 
     img_mosaic, _ = reproject_and_coadd(mosaic_hdus, wcs_mosaic,
@@ -441,7 +445,6 @@ def coadd_images(images_list, output_file,
                                         parallel=False)
 
     trimmed_img, trim_header = trim_image(img_mosaic, footprint=out_footprint, header=out_header)
-    # trimmed_img, trim_header = img_mosaic, out_header
     output_hdus.insert(0,fits.PrimaryHDU(data=trimmed_img.astype(np.single), header=trim_header,
                                          do_not_scale_image_data=True, uint=False))
 
