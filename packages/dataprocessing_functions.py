@@ -48,9 +48,9 @@ def acquisition_remove(dataset,
             demanded_keywords.append(split_expr[0])
             split_expr[1] = split_expr[1].replace('*','.*',2)
             if split_expr[0].lower() in kwd_dict:
-                kwd_dict[split_expr[0].lower()] += "|("+split_expr[1]+")"
+                kwd_dict[split_expr[0].lower()] += r"|("+split_expr[1]+")"
             else:
-                kwd_dict[split_expr[0].lower()] = "\s("+split_expr[1]+")"
+                kwd_dict[split_expr[0].lower()] = r"\s("+split_expr[1]+")"
 
     #.If input dataset is a folder, expand it into a ImageFileCollection
     ifc_keywords = list(set(ifc_keywords+demanded_keywords))
@@ -142,7 +142,9 @@ def header_image(file, reset_header=False, instrument='SAMI'):
     with fits.open(file, mode='update') as hdul:
 
         if ('WCSSOLVE' in hdul[0].header) and (not reset_header): return
-        
+        hdul[0].header.remove('RADECSYS', ignore_missing=True)
+        hdul[0].header.remove('RADECEQ', ignore_missing=True)
+
         image_exts = iaf.image_extensions(hdul, is_hdu=True)
         for ext in image_exts:
             hdr = hdul[ext].header
@@ -177,12 +179,12 @@ def header_remove_duplicate(header,
 
 def header_init(header, instrument='SAMI'):
 
-    header.set("CTYPE1", "RA---TAN", "Coordinate type")
-    header.set("CTYPE2", "DEC--TAN", "Coordinate type")
-    header.set("RADESYSa", "FK5", "Default coordinate system", before="RADECSYS")
-    header.set("CUNIT2", "deg", "Coordinate unit", after="CTYPE1")
-    header.set("CUNIT1", "deg", "Coordinate unit", after="CTYPE1")
-    header.set("EQUINOX", 2000., "Equinox of WCS")
+    header.set("RADESYS", "FK5", "Default coordinate system", before="RA")
+    header.set("EQUINOX", 2000., "Equinox of WCS", before="RA")
+    header.set("CTYPE1", "RA---TAN", "Coordinate type", after="EQUINOX")
+    header.set("CTYPE2", "DEC--TAN", "Coordinate type", after="CTYPE1")
+    header.set("CUNIT1", "deg", "Coordinate unit", after="CTYPE2")
+    header.set("CUNIT2", "deg", "Coordinate unit", after="CUNIT1")
 
     header.remove("BPM", ignore_missing=True)
     header.remove("RADECSYS", ignore_missing=True)
@@ -207,10 +209,13 @@ def header_init(header, instrument='SAMI'):
         header["GAIN"] = 2.1
         header["RDNOISE"] = 4.7
         header["SATURATE"] = 0.8*65536
-        header.set("SIP_FILE",'SAMI_SIP_coefficients.txt','Higher order WCS corrections')
+        header.set("SIP_FILE", 
+                   os.path.join('packages','SAMI_SIP_coefficients.txt'),
+                   'Higher order WCS corrections')
 
     elif instrument == "Goodman":
         header.set('INSTRUME','Goodman')
+        header.set('FILTER1', header['FILTER'], 'primary filter wheel')
         if "PG0_0" in header: del header["PG*"]
         if "N_PRM_0" in header: del header["N_PRM*"]
         ccdsum = np.array([ float(bin) for bin in header['CCDSUM'].split() ])
@@ -246,6 +251,9 @@ def header_init(header, instrument='SAMI'):
     header["CD1_2"] = abs(CDval[1]) * np.sign(CDval[0]) * sent
     header["CD2_1"] = -abs(CDval[0]) * np.sign(CDval[1]) * sent
     header["CD2_2"] = CDval[1] * cost
+    # header.set("CDELT1", -CDval[0],'Coordinate increment at reference point')
+    # header.set("CDELT2", CDval[1],'Coordinate increment at reference point')
+
 
     return header
 
@@ -885,6 +893,10 @@ def fwhm_image(file, image_area=0.50, is_hdu=False, min_fwhm=1.5, **kwargs):
 
     #.calculating FWHM for this extension stars
         tab = fwhm_fit(data, **kwargs)
+        if (tab is None) or (np.sum(np.isfinite(tab['fwhm'])) < 3): 
+            if 'initial_fwhm' not in kwargs: kwargs['initial_fwhm'] = 20.
+            else: kwargs['initial_fwhm'] *= 2
+            tab = fwhm_fit(data, **kwargs)
     #..stacking tables from multiple extensions
         if tab is None: continue
         elif table is None: table = tab
@@ -928,10 +940,15 @@ def fwhm_image(file, image_area=0.50, is_hdu=False, min_fwhm=1.5, **kwargs):
         hdul.close()
 
 
-def fwhm_fit(image, n_max=50, saturation=52430., gain=1):
+def fwhm_fit(image, **kwargs):
 
-    initial_fwhm = 10
-    half_box = initial_fwhm
+    if 'n_max' not in kwargs: kwargs['n_max'] = 50
+    if 'saturation' not in kwargs: kwargs['saturation'] = 52430.
+    if 'initial_fwhm' not in kwargs: kwargs['initial_fwhm'] = 10.
+    if 'gain' not in kwargs: kwargs['gain'] = 1.
+
+    kwargs['initial_fwhm'] = np.round(kwargs['initial_fwhm']).astype(int)
+    half_box = kwargs['initial_fwhm']
 
     #.Using sigma-clipping to model the background
     # (actually, replaced by simple median and MAD for speed)
@@ -941,16 +958,18 @@ def fwhm_fit(image, n_max=50, saturation=52430., gain=1):
     #.Detecting sources using IRAFStarfinder method
     # (actually, DAOFinder is faster than IRAFStarFinder)
     # (find_peaks is even faster, but unreliable)
-    daofinder = DAOStarFinder(3*back_std, 1.5*initial_fwhm,
+    daofinder = DAOStarFinder(5*back_std, kwargs['initial_fwhm'],
                             roundlo=-2.0, roundhi=2.0, sharplo=0.01, sharphi=10.0,
-                            brightest=n_max, exclude_border=False, peakmax=saturation)
+                            brightest=kwargs['n_max'], exclude_border=False, peakmax=kwargs['saturation'])
     
     #..catching zero objects warning and aborting
     with warnings.catch_warnings():
         warnings.filterwarnings("error", category=NoDetectionsWarning)
         try:
             tab = daofinder.find_stars(image[half_box:-half_box,half_box:-half_box]-back_median)
+            nstar = len(tab)
         except NoDetectionsWarning:
+            nstar = 0
             return None
     
     tab['xcentroid'] += half_box
@@ -960,8 +979,8 @@ def fwhm_fit(image, n_max=50, saturation=52430., gain=1):
     #.Building a global pixel grid with 1-FWHM size
     pos_xy = np.arange(-half_box, half_box, 1)
     global_x, global_y = np.meshgrid(pos_xy, pos_xy)
-    params, parerr = np.full((n_max,7), np.nan), np.full((n_max,7), np.nan)
-    semi_axes, theta = np.full((n_max,2), np.nan), np.full(n_max, np.nan)
+    params, parerr = np.full((nstar,7), np.nan), np.full((nstar,7), np.nan)
+    semi_axes, theta = np.full((nstar,2), np.nan), np.full(nstar, np.nan)
 
     for i,row in enumerate(tab):
 
@@ -973,16 +992,16 @@ def fwhm_fit(image, n_max=50, saturation=52430., gain=1):
         #.Fitting 2D model with curve_fit
         datax = np.vstack((grid_x.ravel(),grid_y.ravel())).astype(float)
         datay = image[ycen-half_box:ycen+half_box, xcen-half_box:xcen+half_box].ravel()-back_median
-        datay = datay.clip(min=1)
-        erroy = np.sqrt(datay/gain)
-        p0 = [row['peak'],xcen,ycen,10,0,10,3.5]
+        p0 = [row['peak'],xcen,ycen,kwargs['initial_fwhm'],0,kwargs['initial_fwhm'],3.5]
+        fit_mask = (datay >= 1)
         #..error cactching the fitting
         with warnings.catch_warnings():
             warnings.filterwarnings("error", category=RuntimeWarning)
             warnings.filterwarnings("error", category=OptimizeWarning)
             try:
-                popt, pcov = curve_fit(iaf.moffatxy, datax[:,:], datay[:], p0=p0,
-                                       sigma=erroy[:], absolute_sigma=True)
+                popt, pcov = curve_fit(iaf.moffatxy, datax[:,fit_mask], datay[fit_mask],
+                                       sigma=np.sqrt(datay[fit_mask]/kwargs['gain']), 
+                                       p0=p0, absolute_sigma=True)
             except (RuntimeError, RuntimeWarning, OptimizeWarning):
                 continue
 

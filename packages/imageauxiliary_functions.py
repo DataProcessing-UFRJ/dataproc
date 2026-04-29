@@ -23,7 +23,7 @@ def image_extensions(image, is_hdu=False):
 
 def get_filter_label(filter_list, 
                      ignore_filters=['open','no_filter','unavailable'],
-                     ignore_labels=['s\d{4}','SAM.*','\dx\d','BTF.*']):
+                     ignore_labels=[r's\d{4}',r'SAM.*',r'\dx\d',r'BTF.*']):
 
     #.Ignoring 'bad' filter keywords to get the filter label
     igvals = '|'.join(ignore_filters)
@@ -241,7 +241,7 @@ def iraf2python(my_string):
 def goodman_saturate(header):
     ccdsum = np.array([ float(bin) for bin in header['CCDSUM'].split() ])
     gain = header['GAIN']
-    well_sat = np.prod(ccdsum)*0.8*205000/gain
+    well_sat = np.prod(ccdsum)*0.4*205000/gain
     adc_sat = 0.8*65535
     header['SATURATE'] = np.min([well_sat, adc_sat])
     return(header)

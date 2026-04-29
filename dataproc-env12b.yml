@@ -1,4 +1,4 @@
-name: dataproc-env12
+name: dataproc-env12b
 channels:
   - conda-forge
 dependencies:

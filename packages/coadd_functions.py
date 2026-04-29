@@ -29,7 +29,7 @@ def table_expr_parser(column_expression, column_names, table_name='table'):
                 column_expression = column_expression.replace(var,table_name+"['"+var+"']")
 
     #.Enclosing both sides of boolean operators in parenthesis ()
-    for sep in [' & ',' \| ']:
+    for sep in [r' & ',r' \| ']:
         side = re.split(sep, column_expression)
         if len(side) > 1:
             for j in range(len(side)): side[j] = '('+side[j]+')'
@@ -274,7 +274,7 @@ def coadd_images(images_list, output_file,
         header = hdul[0].header
         imsize = hdul[0].data.shape
         ccdsum = np.array(header['CCDSUM'].split(), dtype=np.single)
-        flat_image = re.findall('master_flat\d\.fits', header['FLATCOR'])[0]
+        flat_image = re.findall(r'master_flat\d\.fits', header['FLATCOR'])[0]
         
         if scale_keyword is None: 
             base_scale = None
@@ -458,6 +458,7 @@ def coadd_images(images_list, output_file,
 
 def coadd_imageset(imageset, multiprocessing=True, **kwargs):
 
+    #.Processing input image sets
     if isinstance(imageset,str): 
         if os.path.isfile(imageset): 
             print(f".Image sets file found: {imageset}")

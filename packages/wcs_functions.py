@@ -26,7 +26,7 @@ def wcs_solve(image,
         fit_scale_plate=False, 
         match_radius=30,
         max_shift=500,
-        SIP_header_file='SIP_file',
+        SIP_header_file=os.path.join('packages','SAMI_SIP_coefficients.txt'),
         figure=None):
 
     #.Reading data
@@ -43,7 +43,7 @@ def wcs_solve(image,
 
     wcssolve = hdr1.get('WCSSOLVE', default=None)
     if wcssolve is not None:
-        res_x, res_y = re.findall('\d+\.\d\d', wcssolve)
+        res_x, res_y = re.findall(r'\d+\.\d\d', wcssolve)
         if float(res_x) < 3 and float(res_y) < 3:
             print(f'.WCS already solved for {filename}: MAE {res_x}, {res_y} pixels')
             if isinstance(image,str): 
@@ -52,11 +52,12 @@ def wcs_solve(image,
             else: return hdu1
 
     #..reading important header keywords
-    fwhm = hdr1.get('FHWM', default=10)
+    fwhm = hdr1.get('FWHM', default=10)
     exptime = hdr1['EXPTIME']
     ra  = Angle(hdr1['CRVAL1'], unit=u.degree)
     dec = Angle(hdr1['CRVAL2'], unit=u.degree)
-    FoV = np.array([hdr1['NAXIS1']*abs(hdr1['CD1_1']), hdr1['NAXIS2']*abs(hdr1['CD2_2'])])*60
+    FoV = np.array([hdr1['NAXIS1']*np.sqrt(hdr1['CD1_1']**2 + hdr1['CD2_1']**2), 
+                    hdr1['NAXIS2']*np.sqrt(hdr1['CD2_2']**2 + hdr1['CD1_2']**2)])*60
     instrument = hdr1['INSTRUME']
 
     #.Processing SIP header file
@@ -76,9 +77,6 @@ def wcs_solve(image,
 #======================================================
     
     #.Using sigma-clipping to model the background
-    # back_median = np.nanmedian(img1)
-    # back_std = 1.4826*np.nanmedian(np.abs(img1-back_median))
-
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=AstropyUserWarning)
         back_mean, back_median, back_std = sigma_clipped_stats( img1, 
@@ -93,13 +91,16 @@ def wcs_solve(image,
     # (actually, DAOFinder is faster than IRAFStarFinder)
     # (find_peaks is even faster, but unreliable)
 
-    daofinder = DAOStarFinder(6*back_std, 1.5*fwhm,  
+    if round(fwhm) <= 10: kernel_fwhm = 1.5*fwhm
+    else: kernel_fwhm = fwhm
+
+    daofinder = DAOStarFinder(3*back_std, kernel_fwhm,  
                               roundlo=-2.0, roundhi=2.0,
                               sharplo=0.01, sharphi=10.0,
                               exclude_border=True, peakmax=hdr1['SATURATE'])
     tab = daofinder.find_stars(img_back)#, mask=detection_mask)
     
-    #.Aborting if not detections were found
+    #.Aborting if no detections were found
     if not tab: nstar = 0
     else: nstar = len(tab)
     if nstar < 10: 
@@ -114,13 +115,13 @@ def wcs_solve(image,
 
     #.Querying Vizier for the catalog
     Vizier.ROW_LIMIT = -1
+    Vizier.VIZIER_SERVER = "vizier.cfa.harvard.edu"   # more stable than default
+    Vizier.TIMEOUT = 60                               # helps if the server is slow
 
     if instrument.lower().find('goodman') >= 0:
         geometry_kwd = {'radius': f"{(FoV[0]+1)/2:.1f} arcmin"}
-        threshold_reduction = 1.5
     else:
         geometry_kwd = {'width': f"{FoV[0]+1:.1f} arcmin", 'height': f"{FoV[1]+1:.1f} arcmin"}
-        threshold_reduction = 1.25
 
     query = Vizier.query_region(SkyCoord(ra=ra, dec=dec, frame='icrs'),
                                 catalog=catalog, column_filters=cat_constraints,

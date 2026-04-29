@@ -5,6 +5,7 @@ from ccdproc import ImageFileCollection
 
 from packages.dataprocessing_functions import acquisition_remove, header_setup, process_bias, process_flat, process_images, reject_cosmicrays, fwhm_estimate
 from packages.astrometry_solve import astrometry_solve
+from packages.coadd_functions import create_image_sets, coadd_imageset
 
 def parse_arguments():
 
@@ -56,7 +57,7 @@ def parse_arguments():
 
 
 def data_reduce(folder,
-                filter_keywords=['filter'],
+                filter_keywords=['filter1','filter2'],
                 summary_keywords=['obstype','object','airmass','exptime'],
                 summary_file='observations.log',
                 logfile='data_reduce.log',
@@ -103,17 +104,17 @@ def data_reduce(folder,
                    master_bias=path.join(folder,'master_bias.fits'), 
                    master_flat=path.join(folder,'master_flat.fits'), 
                    multiprocessing=multiprocessing)
-    
-    #.solving astrometry
-    astrometry_solve(ifc, catalog='I/350', cat_magnitude='Gmag',
-                     multiprocessing=multiprocessing)
-    
-    #.removing cosmic rays 
-    reject_cosmicrays(ifc)
 
     #.estimating FWHM 
     fwhm_estimate(ifc, multiprocessing=multiprocessing)
 
+    #.removing cosmic rays 
+    reject_cosmicrays(ifc)
+
+    #.solving astrometry
+    astrometry_solve(ifc, catalog='I/350', cat_magnitude='Gmag',
+                     multiprocessing=multiprocessing)
+    
     #.updating summary table
     if summary_file:
         ifc.keywords += ['fwhm','beta','ellip','angle','ang_dev','back','back_rms']
@@ -124,7 +125,15 @@ def data_reduce(folder,
                            'ang_dev':'.0f','back':'.1f','back_rms':'.1f'})
 
     #.grouping image sets for image stacking
+    create_image_sets(ifc, 
+                      group_images_by=['object','filter1','filter2','sequence'], 
+                      imsets_file='imsets.json')
     
+    #.stacking image groups in each image set
+    coadd_imageset(path.join(folder,'imsets.json'), 
+                   instrument=instrument,
+                   multiprocessing=multiprocessing)
+
 
 #.Initializing main function from the command line
 if __name__ == '__main__':
