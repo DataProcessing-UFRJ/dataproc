@@ -63,6 +63,7 @@ def wcs_solve(image,
 
     #.Reading important header keywords
     fwhm = hdr1.get('FWHM', default=10)
+    if fwhm <= 2: fwhm = 10
     exptime = hdr1['EXPTIME']
     ra  = Angle(hdr1['CRVAL1'], unit=u.degree)
     dec = Angle(hdr1['CRVAL2'], unit=u.degree)
