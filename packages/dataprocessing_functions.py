@@ -21,12 +21,13 @@ import packages.imageauxiliary_functions as iaf
 import warnings
 from photutils.detection.daofinder import NoDetectionsWarning
 from scipy.optimize import OptimizeWarning
-from ccdproc.image_collection import AstropyUserWarning
+from astropy.utils.exceptions import AstropyUserWarning
 
-    
+
 def acquisition_remove(dataset,
                        keyword_filters=["object = ac*", "object = aq*", "object = foc*", "object = test*", "object = point*"],
-                       filename_filters=["*test*.fits","gp*.fits","GP*.fits","*acq*.fits","*focus*.fits","*foco*.fits"]):
+                       filename_filters=["*test*.fits","gp*.fits","GP*.fits","*acq*.fits","*focus*.fits","*foco*.fits"],
+                       summary_file='observations.log'):
 
 
     ifc_keywords = ['obstype','object','airmass','exptime','filter','filter1','filter2']
@@ -55,8 +56,7 @@ def acquisition_remove(dataset,
     #.If input dataset is a folder, expand it into a ImageFileCollection
     ifc_keywords = list(set(ifc_keywords+demanded_keywords))
     if isinstance(dataset,str): 
-        ifc = ImageFileCollection(dataset, ext=0, keywords=ifc_keywords,
-            glob_exclude="*master*.fits", glob_include="*.fits")
+        ifc = ImageFileCollection(dataset, ext=0, keywords=ifc_keywords, glob_exclude="*master*.fits", glob_include="*.fits")
         
     #.Otherwise the input dataset is already a ImageFileCollection
     else: 
@@ -103,7 +103,11 @@ def acquisition_remove(dataset,
         table[remove_index].write(os.path.join(folder,'removed_images.dat'), 
                                 format='ascii.fixed_width_two_line', 
                                 delimiter=' ', overwrite=True)
-        
+
+    #.Writing data summary table
+    table.write(os.path.join(folder,summary_file),
+                format='ascii.fixed_width_two_line',overwrite=True)
+    
     log_files = glob.glob(os.path.join(folder,'*.log'), recursive=False)
     log_files += glob.glob(os.path.join(folder,'*.txt'), recursive=False)
     for file in log_files:
@@ -142,10 +146,13 @@ def header_image(file, reset_header=False, instrument='SAMI'):
     with fits.open(file, mode='update') as hdul:
 
         if ('WCSSOLVE' in hdul[0].header) and (not reset_header): return
-        hdul[0].header.remove('RADECSYS', ignore_missing=True)
-        hdul[0].header.remove('RADECEQ', ignore_missing=True)
 
         image_exts = iaf.image_extensions(hdul, is_hdu=True)
+        if 0 not in image_exts:
+            hdul[0].header.remove('RADECSYS', ignore_missing=True)
+            hdul[0].header.remove('RADECEQ', ignore_missing=True)
+            hdul[0].header = header_remove_duplicate(hdul[0].header)
+
         for ext in image_exts:
             hdr = hdul[ext].header
             hdr = header_remove_duplicate(hdr)
@@ -198,7 +205,8 @@ def header_init(header, instrument='SAMI'):
     header.remove("CDELT1", ignore_missing=True)
     header.remove("CDELT2", ignore_missing=True)
 
-    if instrument == "SAMI":
+    if instrument.lower().find("sam") >= 0:
+        header.set('INSTRUME','SAMI')
         ccdsum = np.array([ float(bin) for bin in header['CCDSUM'].split() ])
         point_ra = Angle(header['TELRA'], unit = u.hourangle).value*15
         point_dec = Angle(header['TELDEC'], unit = u.degree).value
@@ -213,7 +221,7 @@ def header_init(header, instrument='SAMI'):
                    os.path.join('packages','SAMI_SIP_coefficients.txt'),
                    'Higher order WCS corrections')
 
-    elif instrument == "Goodman":
+    elif instrument.lower().find("goodman") >= 0:
         header.set('INSTRUME','Goodman')
         header.set('FILTER1', header['FILTER'], 'primary filter wheel')
         if "PG0_0" in header: del header["PG*"]
@@ -228,7 +236,8 @@ def header_init(header, instrument='SAMI'):
         header = iaf.goodman_saturate(header)
         header.set('MJD-OBS', Time(header['DATE-OBS']).mjd,"MDJ at start of observation")
         
-    elif instrument == "SOI":
+    elif instrument.lower().find("soi") >= 0:
+        header.set('INSTRUME','SOI')
         ccdsum = np.array([ float(bin) for bin in header['CCDSUM'].split() ])
         point_ra = Angle(header['TELRA'], unit = u.hourangle).value*15
         point_dec = Angle(header['TELDEC'], unit = u.degree).value
@@ -409,19 +418,19 @@ def reduce_image(image_file,
     if can_merge:
         
         #..preparing header of the output image
-        if image_exts[0] != 0: 
-            hdr = hdul[0].header
-            hdr.extend(hdul[1].header, unique=True)
-        else: hdr = hdul[1].header
+        hdr = hdul[image_exts[0]].header
         #..removing keywords no longer needed
         keystodel = ['DATASEC', 'CCDSEC', 'AMPSEC', 'DETSEC', 'NEXTEND', 'EXTNAME']
         for keyw in keystodel: hdr.remove(keyw, ignore_missing=True)
         #..adjusting keywords to the new image format
-        hdr['DETSIZE']=f"[1:{imsz_x},1:{imsz_y}]"
-        hdr['CCDSIZE']=f"[1:{imsz_x},1:{imsz_y}]"
-        hdr.insert('NAXIS', ('NAXIS1', imsz_x, "Axis length"), after=True)
-        hdr.insert('NAXIS1', ('NAXIS2', imsz_y, "Axis length"), after=True)   
+        hdr.set('DETSIZE', f"[1:{imsz_x},1:{imsz_y}]")
+        hdr.set('CCDSIZE', f"[1:{imsz_x},1:{imsz_y}]")
+        hdr.set('NAXIS1', imsz_x, "Axis length")
+        hdr.set('NAXIS2', imsz_y, "Axis length")   
         hdr.append(('AMPMERGE', f"{get_date} Merged {len(image_exts)} amps"))
+        #..appending global header after image header
+        if image_exts[0] != 0: 
+            hdr.extend(hdul[0].header, unique=True)
 
         #..creating output image CCDDATA object
         img = CCDData(img_merge, meta=hdr, unit='adu')
@@ -920,7 +929,7 @@ def fwhm_image(file, image_area=0.50, is_hdu=False, min_fwhm=1.5, **kwargs):
         # major = np.median(table['major_ax'][good_data])
         # minor = np.median(table['minor_ax'][good_data])
     else: fwhm, beta, ellip, angle, angle_dev = 0, 0, 0, 0, 0
-    print(f"median value FWHM = {fwhm} ({n_good} stars)")
+    print(f"median value FWHM = {fwhm:5.2f} ({n_good} stars)")
 
     for ext in np.append(image_indices, 0):
         hdul[ext].header.set("FWHM",fwhm,f"Moffat FWHM (median of {n_good} values)")
@@ -999,7 +1008,8 @@ def fwhm_fit(image, **kwargs):
             warnings.filterwarnings("error", category=RuntimeWarning)
             warnings.filterwarnings("error", category=OptimizeWarning)
             try:
-                popt, pcov = curve_fit(iaf.moffatxy, datax[:,fit_mask], datay[fit_mask],
+                popt, pcov = curve_fit(iaf.moffatxy, 
+                                       datax[:,fit_mask], datay[fit_mask],
                                        sigma=np.sqrt(datay[fit_mask]/kwargs['gain']), 
                                        p0=p0, absolute_sigma=True)
             except (RuntimeError, RuntimeWarning, OptimizeWarning):
@@ -1027,7 +1037,8 @@ def fwhm_fit(image, **kwargs):
     semi_axes[mask,:] = np.nan
     theta[mask] = np.nan
 
-    mof_rad = np.sqrt(semi_axes[:,0]*semi_axes[:,1])    #.geometric mean of semi-axes a,b
+   #.geometric mean of semi-axes a,b
+    mof_rad = np.sqrt(semi_axes[:,0]*semi_axes[:,1])
 
     tab['beta'] = params[:,6]
     tab['major_ax'] = semi_axes[:,0]

@@ -8,7 +8,7 @@ from astropy.nddata import NDData,Cutout2D
 from astropy.wcs import WCS
 import astropy.units as u
 from functools import partial
-from multiprocessing import Pool
+from multiprocessing import Pool, cpu_count
 from parallelbar import progress_starmap, progress_map
 from reproject.mosaicking import find_optimal_celestial_wcs, reproject_and_coadd
 from reproject import reproject_interp, reproject_exact, reproject_adaptive
@@ -204,7 +204,8 @@ def create_image_sets(dataset,
     return imsets
 
 
-def trim_image(image, footprint=None, header=None, image_ext=0, footprint_ext=1):
+def trim_image(image, footprint=None, header=None, 
+               image_ext=0, footprint_ext=1):
 
     #.Opening image
     if isinstance(image, np.ndarray):
@@ -469,10 +470,12 @@ def coadd_imageset(imageset, multiprocessing=True, **kwargs):
     outimages = [setdict['output'] for _,setdict in imageset.items()]
 
     if multiprocessing:
-        # result = progress_starmap(partial(coadd_images, **kwargs), list(zip(setimages,outimages)), 
+        # result = progress_starmap(partial(coadd_images, **kwargs), 
+        #                           list(zip(setimages,outimages)), 
         #                           chunk_size=1, n_cpu=16)
-        with Pool(16) as pool:
-            pool.starmap(partial(coadd_images, **kwargs), zip(setimages,outimages),
+        with Pool(int(cpu_count()/2)) as pool:
+            pool.starmap(partial(coadd_images, **kwargs), 
+                         zip(setimages,outimages),
                          chunksize=1)
 
     else:

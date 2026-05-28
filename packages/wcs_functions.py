@@ -1,4 +1,5 @@
 import os, re
+from copy import copy, deepcopy
 import numpy as np
 from datetime import datetime
 from astropy.io import fits
@@ -11,8 +12,11 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.ndimage import median_filter, gaussian_filter
 from photutils.detection import DAOStarFinder
 from astroquery.vizier import Vizier
+from astroquery.gaia import Gaia
+from inspect import signature
 
 from matplotlib import pyplot as plt
+from packages.dataprocessing_functions import header_init
 
 import warnings
 from astropy.utils.exceptions import AstropyUserWarning
@@ -20,14 +24,13 @@ from astropy.wcs import WCS, FITSFixedWarning
 
 
 def wcs_solve(image, 
-		catalog='I/350', cat_magnitude='Gmag', 
-		cat_constraints={'Gmag': '< 20','IPDfow': '< 1','sepsi': '< 2'},
-		cat_max_objects=150,
-        fit_scale_plate=False, 
+        instrument='INSTRUME',
         match_radius=30,
-        max_shift=500,
-        SIP_header_file=os.path.join('packages','SAMI_SIP_coefficients.txt'),
-        figure=None):
+        offset_max_shift=500,
+        fit_plate_scale=True, 
+        reset_wcs=False,
+        SIP_header_file='SIP_FILE',
+        **kwargs):
 
     #.Reading data
     if isinstance(image,str): hdu1 = fits.open(image, mode='update')
@@ -36,36 +39,70 @@ def wcs_solve(image,
     #.Getting image data (img) and header data (hdr) from the first fits extension
     img1 = hdu1[0].data 
     hdr1 = hdu1[0].header
+    instrument = hdr1.get(instrument, default=instrument)
+
+    #.Reseting WCS if needed
+    if reset_wcs: 
+        hdr1 = header_init(hdr1, instrument=instrument)
+        hdr1.remove('WCSSOLVE', ignore_missing=True)
 
     #..aborting if WCS is already solved
     if isinstance(image,str): filename = image
     else: filename = os.path.basename(hdr1['FILENAME'])
-
+    
     wcssolve = hdr1.get('WCSSOLVE', default=None)
     if wcssolve is not None:
         res_x, res_y = re.findall(r'\d+\.\d\d', wcssolve)
-        if float(res_x) < 3 and float(res_y) < 3:
-            print(f'.WCS already solved for {filename}: MAE {res_x}, {res_y} pixels')
+        n_fit = re.findall(r'N=\d+', wcssolve)[0]
+        if float(res_x) < 1 and float(res_y) < 1:
+            print(f'.WCS already solved for {filename}: MAE {res_x}, {res_y} pixels ({n_fit})')
             if isinstance(image,str): 
                 hdu1.close()
                 return
             else: return hdu1
 
-    #..reading important header keywords
+    #.Reading important header keywords
     fwhm = hdr1.get('FWHM', default=10)
     exptime = hdr1['EXPTIME']
     ra  = Angle(hdr1['CRVAL1'], unit=u.degree)
     dec = Angle(hdr1['CRVAL2'], unit=u.degree)
     FoV = np.array([hdr1['NAXIS1']*np.sqrt(hdr1['CD1_1']**2 + hdr1['CD2_1']**2), 
                     hdr1['NAXIS2']*np.sqrt(hdr1['CD2_2']**2 + hdr1['CD1_2']**2)])*60
-    instrument = hdr1['INSTRUME']
+
+    #.Setting parameters based on instrument:
+    if instrument.lower().find('sam') >= 0:
+        kwargs['query_filters']         = {'Gmag': '< 20'}
+        kwargs['query_geometry']        = {'width': f"{FoV[0]+1:.1f} arcmin", 'height': f"{FoV[1]+1:.1f} arcmin"}
+        kwargs['offset_max_shift']      = 500
+        kwargs['offset_distance_norm']  = [True, True]
+        kwargs['offset_threshold']      = copy(match_radius)
+        kwargs['offset_median_filter']  = None
+        kwargs['rotation_threshold']    = copy(match_radius)
+        kwargs['fit_plate_scale']       = False
+
+    elif instrument.lower().find('goodman') >= 0:
+        kwargs['query_filters']         = {'Gmag': '< 19'}
+        kwargs['query_geometry']        = {'radius': f"{(FoV[0]+1)/2:.1f} arcmin"}
+        kwargs['offset_max_shift']      = 200
+        kwargs['offset_distance_norm']  = [True, False]
+        kwargs['offset_threshold']      = [copy(match_radius), copy(match_radius)+10]
+        kwargs['offset_median_filter']  = 6
+        kwargs['rotation_threshold']    = copy(match_radius)
+        kwargs['fit_plate_scale']       = True
+
+    else:
+        kwargs['query_filters']         = {'Gmag': '< 20','IPDfow': '< 1','sepsi': '< 2'},
+        kwargs['query_geometry']        = {'width': f"{FoV[0]+1:.1f} arcmin", 'height': f"{FoV[1]+1:.1f} arcmin"}
+        kwargs['offset_max_shift']      = offset_max_shift
+        kwargs['fit_plate_scale']       = fit_plate_scale
 
     #.Processing SIP header file
     SIP_file = None
-    if os.path.isfile(SIP_header_file): SIP_file = SIP_header_file
-    elif SIP_header_file in hdr1:
-        if os.path.isfile(hdr1[SIP_header_file]): SIP_file = hdr1[SIP_header_file]
-        else: print('SIP file not found')
+    if instrument.lower().find('sam') >= 0:
+        if os.path.isfile(SIP_header_file): SIP_file = SIP_header_file
+        elif SIP_header_file in hdr1:
+            if os.path.isfile(hdr1[SIP_header_file]): SIP_file = hdr1[SIP_header_file]
+            else: print('SIP file not found')
 
     if SIP_file is not None:
         hdr1 = SIP_file_to_header(SIP_file, hdr1, max_correction=None)
@@ -75,7 +112,6 @@ def wcs_solve(image,
         wcs = WCS(hdr1, fix=False)
 
 #======================================================
-    
     #.Using sigma-clipping to model the background
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=AstropyUserWarning)
@@ -84,12 +120,6 @@ def wcs_solve(image,
             sigma_lower=3, sigma_upper=2, maxiters=3 )
     
     img_back = np.clip(img1 - back_median, a_min=0, a_max=None)
-    # total_error = np.sqrt(back_std**2 + (img_back)/hdr1['GAIN'])
-    # detection_mask = (img_back) < 5*total_error
-
-    #.Detecting sources using IRAFStarfinder method
-    # (actually, DAOFinder is faster than IRAFStarFinder)
-    # (find_peaks is even faster, but unreliable)
 
     if round(fwhm) <= 10: kernel_fwhm = 1.5*fwhm
     else: kernel_fwhm = fwhm
@@ -112,86 +142,72 @@ def wcs_solve(image,
     data_pix = np.transpose((tab['xcentroid'], tab['ycentroid'], tab['mag']))
 
 #======================================================
+    #.Querying online for the astrometric catalog
 
-    #.Querying Vizier for the catalog
-    Vizier.ROW_LIMIT = -1
-    Vizier.VIZIER_SERVER = "vizier.cfa.harvard.edu"   # more stable than default
-    Vizier.TIMEOUT = 60                               # helps if the server is slow
+    # cat = query_Vizier(SkyCoord(ra=ra, dec=dec, frame='icrs'),
+    #                             catalog=catalog, **kwargs)
+    sig = signature(query_Gaia)
+    query_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters.keys()}
+    cat = query_Gaia(SkyCoord(ra=ra, dec=dec, frame='icrs'), **query_kwargs)
 
-    if instrument.lower().find('goodman') >= 0:
-        geometry_kwd = {'radius': f"{(FoV[0]+1)/2:.1f} arcmin"}
-    else:
-        geometry_kwd = {'width': f"{FoV[0]+1:.1f} arcmin", 'height': f"{FoV[1]+1:.1f} arcmin"}
-
-    query = Vizier.query_region(SkyCoord(ra=ra, dec=dec, frame='icrs'),
-                                catalog=catalog, column_filters=cat_constraints,
-                                **geometry_kwd)
-
-    cat=query[0]
-    cat.sort(cat_magnitude)
     ncat=len(cat)
 
     #..getting celestial positions of the catalog stars
-    cat_pos = np.array([cat['RAJ2000'],cat['DEJ2000']]).T
+    cat_pos = np.lib.recfunctions.structured_to_unstructured(np.array(cat))
+    cat_mag = cat_pos[:,2].reshape(ncat,1)
+    cat_pos = cat_pos[:,0:2]
 
     #..transforming positions to pixel values using the image WCS
     cat_pix = wcs.all_world2pix(cat_pos,0)
-
-    #..adding a magnitude column to the catalog stars
-    if cat_magnitude in cat.colnames: 
-        cat_mag = np.array(cat[cat_magnitude].data).reshape(ncat,1)
-    else: cat_mag = np.full(ncat,1)
     cat_pix = np.hstack((cat_pix, cat_mag))
-    
+
     #.matching catalogs density
     data_pix, cat_pix = cat_match_density(data_pix, cat_pix)
 
-    # #..cutting the faintest objects to enforce the number limit
-    # nlim = int(cat_max_objects*np.prod(FoV+1)/np.prod(FoV))
-    # if ncat > nlim: 
-    #     cat_pix = cat_pix[0:nlim-1,:]
-    #     data_pix = data_pix[0:nlim-1,:]
-    # # nlim = np.min([ncat,nlim])
-
 #======================================================
-    
     #.finding the initial translation between the catalog and image stars
-    xoff, yoff = cat_translation(data_pix, cat_pix, 
-                                 match_radius=match_radius,
-                                 max_shift=max_shift, 
-                                 instrument=instrument, figure=figure)
+    sig = signature(cat_translation)
+    offset_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters.keys()}
+    xoff, yoff = cat_translation(data_pix, cat_pix, **offset_kwargs)
+
+    #..updating offsets into the WCS
     hdr1 = wcs_update(hdr1, translation=np.array([xoff,yoff]))
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=FITSFixedWarning)
         wcs = WCS(hdr1, fix=False)
+    #..updating catalog source positions to new WCS
     cat_pix = wcs.all_world2pix(cat_pos,0)
     cat_pix = np.hstack((cat_pix, cat_mag))
 
     #.finding the optimal rotation between the catalog and image stars
     #.(the 2nd,3rd iterations can reduce residuals by 50% each)
-    match_threshold = match_radius
-    for n in range(4):
+    sig = signature(cat_rotation)
+    rotation_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters.keys()}
+
+    for n in range(10):
         scale, rotation, translation, residuals, nmatches = cat_rotation(
-          data_pix[:,0:2], cat_pix[:,0:2], 
-          match_threshold, fit_scale_plate=fit_scale_plate)
+          data_pix[:,0:2], cat_pix[:,0:2], **rotation_kwargs)
           
         if (np.isnan(scale) or np.any(np.isnan(rotation)) or np.any(np.isnan(translation))): break
+        if (n > 2) and (nmatches < 20): break
        
         hdr1 = wcs_update(hdr1, translation=translation, rotation=rotation, scale=scale)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FITSFixedWarning)
             wcs = WCS(hdr1, fix=False)
+
+        if np.all(residuals < 0.5): break
+
         cat_pix = wcs.all_world2pix(cat_pos,0)
         cat_pix = np.hstack((cat_pix, cat_mag))
-        match_threshold /= 1.5
+
+        rotation_kwargs['rotation_threshold'] /= 1.25
 
 #======================================================
-    
     #.Printing
     print(f".WCS solving {filename}: MAE {residuals} pixels ({nmatches} stars)")
 
 #======================================================
-
     #.Saving new header WCS to image
     get_date = datetime.now().strftime("%x %H:%M")
 
@@ -200,7 +216,7 @@ def wcs_solve(image,
             hdu1.close()
 
     else:
-        wcsinf = f"{get_date} Catalog {catalog}: MAE {residuals[0]:.2f}, {residuals[1]:.2f} pixels (N={nmatches})"
+        wcsinf = f"{get_date} Catalog I/350: MAE {residuals[0]:.2f}, {residuals[1]:.2f} pixels (N={nmatches})"
         hdr1.set('WCSSOLVE', wcsinf)
 
         hdu1[0].header = hdr1
@@ -208,6 +224,50 @@ def wcs_solve(image,
             hdu1.writeto(image, overwrite=True)
             hdu1.close()
         else: return hdu1
+
+
+def query_Gaia(coordinate, 
+               query_filters={'Gmag': '< 20'},
+               query_geometry={'width': '4 arcmin', 'height': '4 arcmin'},
+               query_sort='Gmag'):
+    
+    filters = copy(query_filters)
+    filters['phot_g_mean_mag'] = filters.pop('Gmag')
+    columns = set(['RA','DEC','phot_g_mean_mag']+list(filters.keys()))
+    
+    Gaia.ROW_LIMIT = -1
+    cat = Gaia.query_object(coordinate=coordinate, 
+                            columns=columns,**query_geometry)
+    
+    for column,filter in filters.items():
+        mask = eval(f"cat['{column}'] {filter}")
+        if np.any(mask): cat = cat[mask]
+
+    cat.rename_column('phot_g_mean_mag','Gmag')
+    cat.rename_column('RA','RAJ2000')
+    cat.rename_column('DEC','DEJ2000')
+    cat.sort(query_sort)
+    return cat['RAJ2000','DEJ2000',query_sort]
+
+
+def query_Vizier(coordinate, query_catalog='I/350', 
+                 query_filters={'Gmag': '< 20'}, 
+                 query_geometry={'width': '4 arcmin', 'height': '4 arcmin'},
+                 query_sort='Gmag',
+                 server=None):
+    
+    Vizier.ROW_LIMIT = -1
+    Vizier.TIMEOUT = 60                               
+    if server is not None: Vizier.VIZIER_SERVER = server   
+
+    query = Vizier.query_region(coordinate, 
+                                catalog=query_catalog, 
+                                column_filters=query_filters,
+                                **query_geometry)
+
+    cat=query[0]
+    cat.sort(query_sort)
+    return cat['RAJ2000','DEJ2000',query_sort]
 
 
 def cat_match_density(dat, cat):
@@ -242,32 +302,36 @@ def cat_match_density(dat, cat):
     return dat, cat
 
 
-def cat_translation(dat, cat, match_radius=30, max_shift=500, instrument='SAMI', figure=None):
+def cat_translation(dat, cat, 
+                    offset_threshold=30,
+                    offset_max_shift=250, 
+                    offset_median_filter=None,
+                    offset_distance_norm=[False, False], 
+                    offset_figure=None):
 
-    if instrument.lower().find('sam') >= 0:
-        usedist=[True, True]
-    elif instrument.lower().find('goodman') >= 0:
-        usedist=[True, False]
-    else: 
-        usedist=[False, False]
-
+    if isinstance(offset_threshold, int) or isinstance(offset_threshold,float):
+        match_threshold = [offset_threshold]*2
+    elif isinstance(offset_threshold,list):
+        match_threshold = offset_threshold[0:2]
+    
     #.finding rough offset solution
     xoffset, yoffset = cat_grid_offset(dat[:,0:2], cat[:,0:2], 
-                                    match_radius,
-                                    grid_size=max_shift,
-                                    norm_box=6,
-                                    use_distance=usedist[0],
-                                    figure=figure)
+                                    match_threshold[0],
+                                    grid_size=offset_max_shift,
+                                    norm_box=offset_median_filter,
+                                    use_distance=offset_distance_norm[0],
+                                    figure=offset_figure)
+    
     #.refining offset solution
-    xoffset, yoffset = cat_grid_offset(dat[:,0:2], cat[:,0:2],
-                                    match_radius, 
+    xoffset2, yoffset2 = cat_grid_offset(dat[:,0:2], cat[:,0:2],
+                                    match_threshold[1], 
                                     grid_center=(xoffset,yoffset),
-                                    grid_size=match_radius*1.414,
-                                    grid_spacing=match_radius/10,
-                                    smooth_sigma=True,
-                                    use_distance=usedist[1],
-                                    figure=figure)
-    return xoffset, yoffset
+                                    grid_size=match_threshold[1]*1.414,
+                                    grid_spacing=match_threshold[1]/10,
+                                    smooth_sigma=1,
+                                    use_distance=offset_distance_norm[1],
+                                    figure=offset_figure)
+    return xoffset2, yoffset2
 
 
 def cat_grid_offset(dat, cat, match_radius, 
@@ -281,18 +345,20 @@ def cat_grid_offset(dat, cat, match_radius,
     
     if type(grid_size) is float: grid_size=(round(grid_size),round(grid_size))
     if type(grid_size) is int: grid_size=(grid_size, grid_size)
-    if grid_spacing is None: grid_spacing = match_radius
+    if grid_spacing is None: grid_spacing = match_radius/2.
     if (norm_box == 0): norm_box = None
 
     #.building translation grid
-    tgrid_x = np.arange(grid_center[0]-grid_size[0], grid_center[0]+grid_size[0], grid_spacing)
-    tgrid_y = np.arange(grid_center[1]-grid_size[1], grid_center[1]+grid_size[1], grid_spacing)
+    tgrid_x = np.arange(grid_center[0]-grid_size[0], 
+                        grid_center[0]+grid_size[0], round(grid_spacing))
+    tgrid_y = np.arange(grid_center[1]-grid_size[1], 
+                        grid_center[1]+grid_size[1], round(grid_spacing))
     grid_x, grid_y = np.meshgrid(tgrid_x, tgrid_y)
     
     #.setting up diagnostic variables
     grid_shape = (len(tgrid_x), len(tgrid_y))
     nmatches = np.zeros(grid_shape)
-    distance = np.full(grid_shape, match_radius*2)
+    distance = np.full(grid_shape, float(match_radius*2))
 
     #.setting up Neighbors structure
     nbrs = NearestNeighbors(n_neighbors=1, algorithm='auto')
@@ -325,7 +391,7 @@ def cat_grid_offset(dat, cat, match_radius,
     x_out, y_out = np.mean(grid_x[best_solution]), np.mean(grid_y[best_solution])
 
     #-----------------------------------------------------------------------------
-    if figure is not None:
+    if figure:
 
         figure = plt.figure(figsize=(12,5))
 
@@ -335,12 +401,12 @@ def cat_grid_offset(dat, cat, match_radius,
         
         #.Plotting colormesh of the number of matches for each offset    
         ax1 = figure.add_subplot(1,2,1)
-        cm = ax1.pcolormesh(grid_x-grid_spacing/2, grid_y-grid_spacing/2, 
+        cm = ax1.pcolormesh(grid_x, grid_y, 
                             indicator, cmap='inferno_r')
         plt.colorbar(cm, label=plotlabel, ax=ax1)
         ax1.set_xlabel(r'X$_\mathrm{offset}$ (pix)')
         ax1.set_ylabel(r'Y$_\mathrm{offset}$ (pix)')
-        ax1.scatter(x_out-grid_spacing/2, y_out-grid_spacing/2, marker='x', s=20, c='r')
+        ax1.scatter(x_out, y_out, marker='x', s=20, c='r')
 
         #.Plotting surface of the number of matches for each offset
         ax2 = figure.add_subplot(1,2,2, projection='3d', anchor='W')     
@@ -348,18 +414,20 @@ def cat_grid_offset(dat, cat, match_radius,
                         linewidth=0, antialiased=True)
         ax2.set_xlabel(r'X$_\mathrm{offset}$ (pix)')
         ax2.set_ylabel(r'Y$_\mathrm{offset}$ (pix)')
+
+        plt.annotate(f"({x_out}, {y_out})",(0.40,0.05),xycoords='figure fraction')
     #-----------------------------------------------------------------------------
 
     return x_out, y_out
 
 
-def cat_rotation(dat, cat, match_threshold, fit_scale_plate=True):
+def cat_rotation(dat, cat, rotation_threshold, fit_plate_scale=True):
 
     #.matching the catalog with the translated image postions
     nbrs = NearestNeighbors(n_neighbors=1, algorithm='auto').fit(cat)
     distance, index = nbrs.kneighbors(dat)
     #..selecting only matches with distance inferior to the selected threshold
-    mask = (distance < match_threshold)
+    mask = (distance < rotation_threshold)
     distance, index = distance[mask], index[mask]
 
     #..saving the matched pairs in new arrays
@@ -368,10 +436,10 @@ def cat_rotation(dat, cat, match_threshold, fit_scale_plate=True):
     nmatches = len(matched_data)
     
     #..aborting if there are not enough matches
-    if nmatches < 3: return np.nan, np.nan*np.identity(2), np.full(2,np.nan), 'not solved', nmatches
+    if nmatches < 10: return np.nan, np.nan*np.identity(2), np.full(2,np.nan), 'not solved', nmatches
         
     #.Using Kabsh algoritm to find the optimal scaling and rotation of the data
-    scale, rotation, translation = rigid_transform_3D(matched_cat, matched_data, scale=fit_scale_plate)
+    scale, rotation, translation = rigid_transform_3D(matched_cat, matched_data, scale=fit_plate_scale)
     # print("scale:",scale,"\n","translation:",translation,"\n","rotation:\n",rotation)
 
     #..calculating the residuals of the transformation:
@@ -507,4 +575,5 @@ def SIP_file_to_header(sip_file, header, max_correction=70):
             header.set("A_DMAX", max_correction[0], "X maximum correction [pixel]")
             header.set("B_DMAX", max_correction[1], "Y maximum correction [pixel]")
     return header
+
 

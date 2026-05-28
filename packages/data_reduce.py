@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
+import warnings
 from os import path
 from argparse import ArgumentParser
-from ccdproc import ImageFileCollection
-
 from packages.dataprocessing_functions import acquisition_remove, header_setup, process_bias, process_flat, process_images, reject_cosmicrays, fwhm_estimate
 from packages.astrometry_solve import astrometry_solve
 from packages.coadd_functions import create_image_sets, coadd_imageset
+
+warnings.simplefilter('ignore',UserWarning)
+from ccdproc import ImageFileCollection
+
 
 def parse_arguments():
 
@@ -59,7 +62,6 @@ def parse_arguments():
 def data_reduce(folder,
                 filter_keywords=['filter1','filter2'],
                 summary_keywords=['obstype','object','airmass','exptime'],
-                summary_file='observations.log',
                 logfile='data_reduce.log',
                 instrument='SAMI',
                 multiprocessing=False):
@@ -76,14 +78,8 @@ def data_reduce(folder,
         glob_exclude='*master*.fits', glob_include='*.fits')
 
     #.removing acquisition images
-    acquisition_remove(ifc)
+    acquisition_remove(ifc, summary_file='observations.log')
       
-    #.writing data summary table
-    if summary_file:
-        tab=ifc.summary
-        tab.write(path.join(folder,summary_file),
-                  format='ascii.fixed_width_two_line',overwrite=True)
-
     #.configuring HEADERS
     header_setup(ifc, instrument=instrument,
                  multiprocessing=multiprocessing)
@@ -116,13 +112,11 @@ def data_reduce(folder,
                      multiprocessing=multiprocessing)
     
     #.updating summary table
-    if summary_file:
-        ifc.keywords += ['fwhm','beta','ellip','angle','ang_dev','back','back_rms']
-        tab=ifc.summary
-        tab.write(path.join(folder,'proc'+folder.replace('/','')+'.log'),
-                  format='ascii.fixed_width_two_line',overwrite=True,
-                  formats={'fwhm':'.1f','beta':'.2f','ellip':'.2f','angle':'.0f',
-                           'ang_dev':'.0f','back':'.1f','back_rms':'.1f'})
+    ifc.keywords += ['fwhm','beta','ellip','angle','ang_dev','back','back_rms']
+    tab=ifc.summary
+    tab.write(path.join(folder,'observations.log'),
+                format='ascii.fixed_width_two_line',overwrite=True,
+                formats={'fwhm':'.1f','beta':'.2f','ellip':'.2f','angle':'.0f','ang_dev':'.0f','back':'.1f','back_rms':'.1f'})
 
     #.grouping image sets for image stacking
     create_image_sets(ifc, 
