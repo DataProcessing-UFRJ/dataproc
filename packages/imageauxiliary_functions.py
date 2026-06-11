@@ -358,19 +358,19 @@ def moffat2d(xy,I,x0,y0,a,b):
     return I*( 1 + ((x-x0)/a)**2 + ((y-y0)/a)**2 )**(-b)
 
 
-def moffatxy(xy,I,x0,y0,a,b,c,g):
+def moffatxy(xy,I,x0,y0,a,b,c,g,bg):
     """
     Definition of the elliptical two-dimensional Moffat intensity profile:
     
-    f(r) = I / ( 1 + mhd^2 )^g
+    f(r) = I / ( 1 + mhd^2 )^g + bg
 
     where   mhd is the Mahalanobis distance from the source center, calculated as:
 
             mhd = (XY - u0) x ICOV x (XY - u0)^t
 
             ICOV is the inverse of the covariance matrix defined as:
-                COV = [[a^2, b.a.c]
-                       [b.a.c, c^2]]
+                COV = [[a^2,  b]
+                       [b,  c^2]]
 
             XY are the data pixel coordinates vector
                 XY = [x, y]
@@ -381,10 +381,10 @@ def moffatxy(xy,I,x0,y0,a,b,c,g):
             a,c are the elliptical Moffat characteristic radii in x,y axis
                 FWHM = 2.a.sqrt(2^(1/b) - 1)   - seeing
                 r_50 = a.sqrt(2^(1/(b-1)) -1)  - half flux radius
-            b is the x,y correlation coefficient
+            b is the x,y covariance
             g is the Moffat characteristic exponent (~2.5-4.0)
             f(x,y) is the model source intensity at each coordinate 
-
+            bg is background intensity at source vicinity
 
     Arguments
     ---------
@@ -399,10 +399,68 @@ def moffatxy(xy,I,x0,y0,a,b,c,g):
         c : float
             Moffat characteristic radius of the profile (minor axis).
         b : float
-            correlation coefficient between a and c.
+            covariance between (x,y).
         g : float
             Moffat characteristic exponent. For stellar objects it usually 
             falls in the 2.5-4.0 range. 
+        bg : float
+            Backgound intensity in the source vicinity
+
+    Returns
+    -------
+        intensities : 1D-array
+            the program will return a array of the calculated intensities at
+            each coordinate pair            
+    """
+    xy0 = np.array([x0,y0]).reshape((2,1))
+    cov_mat = np.asmatrix([[a**2, b], [b, c**2]])
+    cov_inv = np.linalg.inv(cov_mat)
+    squared_mahalanobis = np.diag(np.dot(np.dot((xy-xy0).T,cov_inv),(xy-xy0)))
+
+    return I/( 1 + squared_mahalanobis )**g + bg
+
+
+def gaussxy(xy,I,x0,y0,a,b,c,bg):
+    """
+    Definition of the bivariate gaussian intensity profile:
+    
+    f(r) = I * exp( -0.5 * mhd^2 ) + bg
+
+    where:  mhd = (XY - u0) x ICOV x (XY - u0)^t
+            is the Mahalanobis distance from the source center, 
+
+            ICOV is the inverse of the covariance matrix defined as:
+                COV = [[a^2, b.a.c]
+                       [b.a.c, c^2]]
+
+            XY are the data pixel coordinates vector
+                XY = [x, y]
+            u0 is the source peak (center) pixel coordinates vector
+                u0 = (x0, y0)
+            I is the central intensity.
+                for PDF normalization: I = 1/(2.pi.a.c.sqrt(1-b^2))
+            a,c are the elliptical characteristic radii in x,y axis
+                FWHM = 2.355*sqrt(a.c) - seeing
+                r_50 = FWHM/2 - half flux radius
+            b is the x,y correlation coefficient
+
+
+    Arguments
+    ---------
+        (x,y) : 2D-array (2 x N)
+            X, Y pixel coordinates of the source data
+        x0, y0: float
+            souce peak (centre) pixel coordinates
+        I : float
+            maximum intensity (central value) of the profile
+        a : float
+            characteristic radius of the profile (major-axis).
+        c : float
+            characteristic radius of the profile (minor axis).
+        b : float
+            correlation coefficient between a and c.
+        bg: float
+            background intensity at source vicinity
 
     Returns
     -------
@@ -415,4 +473,4 @@ def moffatxy(xy,I,x0,y0,a,b,c,g):
     cov_inv = np.linalg.inv(cov_mat)
     squared_mahalanobis = np.diag(np.dot(np.dot((xy-xy0).T,cov_inv),(xy-xy0)))
 
-    return I/( 1 + squared_mahalanobis )**g
+    return I * np.exp( -0.5 * squared_mahalanobis ) + bg

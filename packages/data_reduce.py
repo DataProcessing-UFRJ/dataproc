@@ -102,7 +102,8 @@ def data_reduce(folder,
                    multiprocessing=multiprocessing)
 
     #.estimating FWHM 
-    fwhm_estimate(ifc, multiprocessing=multiprocessing)
+    fwhm_estimate(ifc, fwhm_model='gaussian', 
+                  multiprocessing=multiprocessing)
 
     #.removing cosmic rays 
     reject_cosmicrays(ifc)

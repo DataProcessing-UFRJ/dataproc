@@ -60,6 +60,8 @@ def wcs_solve(image,
                 hdu1.close()
                 return
             else: return hdu1
+    else: 
+        print(f".WCS solving {filename}:", end=" ")
 
     #.Reading important header keywords
     fwhm = hdr1.get('FWHM', default=10)
@@ -67,13 +69,15 @@ def wcs_solve(image,
     exptime = hdr1['EXPTIME']
     ra  = Angle(hdr1['CRVAL1'], unit=u.degree)
     dec = Angle(hdr1['CRVAL2'], unit=u.degree)
-    FoV = np.array([hdr1['NAXIS1']*np.sqrt(hdr1['CD1_1']**2 + hdr1['CD2_1']**2), 
-                    hdr1['NAXIS2']*np.sqrt(hdr1['CD2_2']**2 + hdr1['CD1_2']**2)])*60
+    FoV = np.array(
+        [hdr1['NAXIS1']*np.sqrt(hdr1['CD1_1']**2 + hdr1['CD2_1']**2), 
+         hdr1['NAXIS2']*np.sqrt(hdr1['CD2_2']**2 + hdr1['CD1_2']**2)])*60
 
     #.Setting parameters based on instrument:
     if instrument.lower().find('sam') >= 0:
         kwargs['query_filters']         = {'Gmag': '< 20'}
-        kwargs['query_geometry']        = {'width': f"{FoV[0]+1:.1f} arcmin", 'height': f"{FoV[1]+1:.1f} arcmin"}
+        kwargs['query_geometry']        = {'width': f"{FoV[0]+1:.1f} arcmin", 
+                                           'height': f"{FoV[1]+1:.1f} arcmin"}
         kwargs['offset_max_shift']      = 500
         kwargs['offset_distance_norm']  = [True, True]
         kwargs['offset_threshold']      = copy(match_radius)
@@ -92,8 +96,10 @@ def wcs_solve(image,
         kwargs['fit_plate_scale']       = True
 
     else:
-        kwargs['query_filters']         = {'Gmag': '< 20','IPDfow': '< 1','sepsi': '< 2'},
-        kwargs['query_geometry']        = {'width': f"{FoV[0]+1:.1f} arcmin", 'height': f"{FoV[1]+1:.1f} arcmin"}
+        kwargs['query_filters']         = {'Gmag': '< 20','IPDfow': '< 1',
+                                           'sepsi': '< 2'},
+        kwargs['query_geometry']        = {'width': f"{FoV[0]+1:.1f} arcmin", 
+                                           'height': f"{FoV[1]+1:.1f} arcmin"}
         kwargs['offset_max_shift']      = offset_max_shift
         kwargs['fit_plate_scale']       = fit_plate_scale
 
@@ -135,7 +141,7 @@ def wcs_solve(image,
     if not tab: nstar = 0
     else: nstar = len(tab)
     if nstar < 10: 
-        print(f".WCS solving {filename}: not solved ({nstar} stars)")
+        print(f"not solved. Too few detections ({nstar} stars)")
         return
 
     #.Compiling detections table to compare with the catalog
@@ -190,23 +196,23 @@ def wcs_solve(image,
           data_pix[:,0:2], cat_pix[:,0:2], **rotation_kwargs)
           
         if (np.isnan(scale) or np.any(np.isnan(rotation)) or np.any(np.isnan(translation))): break
-        if (n > 2) and (nmatches < 20): break
+        if (n > 2) and (nmatches < 10): break
        
         hdr1 = wcs_update(hdr1, translation=translation, rotation=rotation, scale=scale)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FITSFixedWarning)
             wcs = WCS(hdr1, fix=False)
 
-        if np.all(residuals < 0.5): break
+        if np.all(residuals < 0.5) and n > 2: break
 
         cat_pix = wcs.all_world2pix(cat_pos,0)
         cat_pix = np.hstack((cat_pix, cat_mag))
 
-        rotation_kwargs['rotation_threshold'] /= 1.25
+        if nmatches > 20: rotation_kwargs['rotation_threshold'] /= 1.25
 
 #======================================================
     #.Printing
-    print(f".WCS solving {filename}: MAE {residuals} pixels ({nmatches} stars)")
+    print(f"MAE {residuals} pixels ({nmatches} stars)")
 
 #======================================================
     #.Saving new header WCS to image
@@ -391,7 +397,7 @@ def cat_grid_offset(dat, cat, match_radius,
     best_solution = np.where(indicator == np.nanmax(indicator))
     x_out, y_out = np.mean(grid_x[best_solution]), np.mean(grid_y[best_solution])
 
-    #-----------------------------------------------------------------------------
+    #---------------------------------------------------------------------------
     if figure:
 
         figure = plt.figure(figsize=(12,5))
@@ -417,7 +423,7 @@ def cat_grid_offset(dat, cat, match_radius,
         ax2.set_ylabel(r'Y$_\mathrm{offset}$ (pix)')
 
         plt.annotate(f"({x_out}, {y_out})",(0.40,0.05),xycoords='figure fraction')
-    #-----------------------------------------------------------------------------
+    #---------------------------------------------------------------------------
 
     return x_out, y_out
 
@@ -437,11 +443,10 @@ def cat_rotation(dat, cat, rotation_threshold, fit_plate_scale=True):
     nmatches = len(matched_data)
     
     #..aborting if there are not enough matches
-    if nmatches < 10: return np.nan, np.nan*np.identity(2), np.full(2,np.nan), 'not solved', nmatches
+    # if nmatches < 10: return np.nan, np.nan*np.identity(2), np.full(2,np.nan), 'not solved', nmatches
         
     #.Using Kabsh algoritm to find the optimal scaling and rotation of the data
     scale, rotation, translation = rigid_transform_3D(matched_cat, matched_data, scale=fit_plate_scale)
-    # print("scale:",scale,"\n","translation:",translation,"\n","rotation:\n",rotation)
 
     #..calculating the residuals of the transformation:
     corrected_dat = scale*(rotation @ matched_data.T).T + translation
@@ -451,8 +456,6 @@ def cat_rotation(dat, cat, rotation_threshold, fit_plate_scale=True):
     # var = np.sum(res**2, axis=0)/nmatches
     # rmse = np.sqrt(var)
     # rchi =  np.sqrt(np.sum(res**2/var, axis=0)/(nmatches-7))
-
-    # print(f"transormation residuals (pixels): {mae} ({nmatches})")
 
     return scale, rotation, translation, mae, nmatches
 
@@ -496,7 +499,11 @@ def rigid_transform_3D(A, B, scale=True):
     return c, R, t
 
 
-def wcs_update(header, translation=(0,0), rotation=np.identity(2), scale=1, keep_origin=True):
+def wcs_update(header, 
+               translation=(0,0), 
+               rotation=np.identity(2), 
+               scale=1, 
+               keep_origin=True):
    
     #.Saving tangent point coordinates (pixel)
     tan_x, tan_y = header['CRPIX1'], header['CRPIX2']

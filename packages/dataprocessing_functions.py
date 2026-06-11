@@ -63,8 +63,21 @@ def acquisition_remove(dataset,
         ifc = dataset
         ifc.keywords += demanded_keywords
 
-    #.Backing up RAW data before any file deletion
+    #.Filtering corrupt images (by file size)
     folder = ifc.location
+    file_list = ifc.files
+    for file in file_list:
+        file_path = os.path.join(folder,file)
+        if os.path.getsize(file_path) == 0: 
+            try: os.remove(file_path)
+            except OSError: pass
+    
+    #..updating file collection
+    ifc.refresh()
+    file_list = ifc.files_filtered(include_path=True)
+    table = ifc.summary
+
+    #.Backing up RAW data before any file deletion
     if not os.path.isdir(os.path.join(folder,'raw')):
         copytree(folder, os.path.join(folder,'raw'), dirs_exist_ok=False)
 
@@ -74,7 +87,7 @@ def acquisition_remove(dataset,
         keyword_filtered = ifc.files_filtered(**kwd_dict, regex_match=True, include_path=True)
 
     else: keyword_filtered = []
-
+    
     #.Filtering images by filename selection
     if filename_filters is not None:
 
@@ -85,9 +98,6 @@ def acquisition_remove(dataset,
     else: filename_filtered = []
 
     #.Gahtering filtered images and deleting
-    table = ifc.summary
-    file_list = ifc.files_filtered(include_path=True)
-
     remove_list = keyword_filtered + filename_filtered
     remove_index = []
 
@@ -108,6 +118,7 @@ def acquisition_remove(dataset,
     table.write(os.path.join(folder,summary_file),
                 format='ascii.fixed_width_two_line',overwrite=True)
     
+    #.Removing random .log and .txt files in the folder
     log_files = glob.glob(os.path.join(folder,'*.log'), recursive=False)
     log_files += glob.glob(os.path.join(folder,'*.txt'), recursive=False)
     for file in log_files:
@@ -864,12 +875,18 @@ def fwhm_estimate(dataset, multiprocessing=False, **kwargs):
             fwhm_image(file, **kwargs)
 
 
-def fwhm_image(file, image_area=0.50, is_hdu=False, min_fwhm=1.5, **kwargs):
+def fwhm_image(file, is_hdu=False, **kwargs):
 
     if is_hdu: hdul=file
     else: hdul = fits.open(file, mode='update')
 
-    print(f".Moffat fitting {file}:", end=" ")
+    fwhm_model = kwargs.pop('fwhm_model', 'gaussian')
+    border_size = kwargs.pop('border_size', 0.20)
+
+    if fwhm_model.lower().find('moffat') >= 0: fwhm_fit = fwhm_moffat
+    elif fwhm_model.lower().find('gauss')>= 0: fwhm_fit = fwhm_gaussian
+
+    print(f".FWHM fitting {file}:", end=" ")
 
     #.aborting if FWHM is found in header
     ifwhm = hdul[0].header.get('FWHM')
@@ -889,7 +906,7 @@ def fwhm_image(file, image_area=0.50, is_hdu=False, min_fwhm=1.5, **kwargs):
 
         if n_ext == 1:
             imsz = img.shape
-            border = (1-image_area)/2
+            border = border_size
             data = img[round(border*imsz[0]):round((1-border)*imsz[0]),
                        round(border*imsz[1]):round((1-border)*imsz[1])]
         else: data = img
@@ -901,47 +918,50 @@ def fwhm_image(file, image_area=0.50, is_hdu=False, min_fwhm=1.5, **kwargs):
             kwargs['gain'] = hdr.get('GAIN', default=1)
 
     #.calculating FWHM for this extension stars
-        tab = fwhm_fit(data, **kwargs)
-        if (tab is None) or (np.sum(np.isfinite(tab['fwhm'])) < 3): 
+        ext_tab = fwhm_fit(data, **kwargs)
+        if (ext_tab is None) or (np.sum(np.isfinite(ext_tab['fwhm'])) < 3): 
             if 'initial_fwhm' not in kwargs: kwargs['initial_fwhm'] = 20.
             else: kwargs['initial_fwhm'] *= 2
-            tab = fwhm_fit(data, **kwargs)
+            ext_tab = fwhm_fit(data, **kwargs)
     #..stacking tables from multiple extensions
-        if tab is None: continue
-        elif table is None: table = tab
-        else: table = vstack([table,tab], metadata_conflicts='silent')
+        if ext_tab is None: continue
+        elif table is None: table = ext_tab
+        else: table = vstack([table,ext_tab], metadata_conflicts='silent')
         
     #.if there are enough stars, skip to the end 
-        good_data = np.isfinite(table['fwhm']) & (table['fwhm'] > min_fwhm)
+        good_data = (table['fwhm'] > 1.5)
         n_good = np.sum(good_data)
         if n_good >= 10: break
 
-    #.getting best value for FWHM and storing in header
+    #.Exiting if FWHM could not be estimated
     if table is None: n_good = 0
-    
-    if n_good > 0:
+    if n_good == 0:
+        print(f"median value FWHM = NaN ({n_good} stars)")
+        if is_hdu: return hdul
+        else: 
+            hdul.close()
+            return
+    else: 
         fwhm = np.median(table['fwhm'][good_data])
-        beta = np.median(table['beta'][good_data])
-        ellip = np.median(table['ellipticity'][good_data])
-        angle = np.median(table['theta'][good_data])
-        angle_dev = mad_std(table['theta'][good_data])
-        # r50 = np.median(table['r50'][good_data])
-        # major = np.median(table['major_ax'][good_data])
-        # minor = np.median(table['minor_ax'][good_data])
-    else: fwhm, beta, ellip, angle, angle_dev = 0, 0, 0, 0, 0
-    print(f"median value FWHM = {fwhm:5.2f} ({n_good} stars)")
+        print(f"median value FWHM = {fwhm:5.2f} ({n_good} stars)")
 
+    #.Getting median parameters values and storing in header
     for ext in np.append(image_indices, 0):
-        hdul[ext].header.set("FWHM",fwhm,f"Moffat FWHM (median of {n_good} values)")
-        hdul[ext].header.set("ELLIP",ellip,f"Source ellipticity (median of {n_good} values)")
-        hdul[ext].header.set("ANGLE",angle,f"X-axis source angle (median of {n_good} values)")
-        hdul[ext].header.set("ANG_DEV",angle_dev,f"X-axis angle deviation (MAD of {n_good} values)")
-        hdul[ext].header.set("BETA",beta,f"Moffat Beta (median of {n_good} values)")
-        # hdul[ext].header.set("R50",r50,f"Moffat Half-light radius (median of {n_good} values)")
-        # hdul[ext].header.set("MAJ_AX",major,f"Moffat major semi-axis (median of {n_good} values)")
-        # hdul[ext].header.set("MIN_AX",minor,f"Moffat minor semi-axis (median of {n_good} values)")
-        hdul[ext].header.set("BACK",table.meta['back'],f"Median background value")
-        hdul[ext].header.set("BACK_RMS",table.meta['back_rms'],f"Background std-dev (from MAD)")
+        hdul[ext].header.set("FWHM",  np.median(table['fwhm'][good_data]),
+                             f"Source FWHM (median of {n_good} values)")
+        hdul[ext].header.set("ELLIP", np.median(table['ellip'][good_data]),
+                             f"Source ellipticity (median of {n_good} values)")
+        hdul[ext].header.set("ANGLE", np.median(table['theta'][good_data]),
+                             f"X-axis source angle (median of {n_good} values)")
+        hdul[ext].header.set("ANG_DEV",mad_std(table['theta'][good_data]),
+                             f"X-axis angle deviation (MAD of {n_good} values)")
+        if ('beta' in table.colnames):
+            hdul[ext].header.set("BETA",np.median(table['beta'][good_data]),
+                                 f"Moffat Beta (median of {n_good} values)")
+        hdul[ext].header.set("BACK", table.meta['back'],
+                             f"Median background value")
+        hdul[ext].header.set("BACK_RMS", table.meta['back_rms'],
+                             f"Background std-dev (from MAD)")
 
     #.returning
     if is_hdu: return hdul
@@ -949,15 +969,16 @@ def fwhm_image(file, image_area=0.50, is_hdu=False, min_fwhm=1.5, **kwargs):
         hdul.close()
 
 
-def fwhm_fit(image, **kwargs):
+def fwhm_moffat(image, **kwargs):
 
-    if 'n_max' not in kwargs: kwargs['n_max'] = 50
-    if 'saturation' not in kwargs: kwargs['saturation'] = 52430.
-    if 'initial_fwhm' not in kwargs: kwargs['initial_fwhm'] = 10.
-    if 'gain' not in kwargs: kwargs['gain'] = 1.
+    n_max =         kwargs.pop('n_max', 50)
+    saturation =    kwargs.pop('saturation', 52430.)
+    initial_fwhm =  kwargs.pop('initial_fwhm', 10.)
+    gain =          kwargs.pop('gain', 1.)
 
-    kwargs['initial_fwhm'] = np.round(kwargs['initial_fwhm']).astype(int)
-    half_box = kwargs['initial_fwhm']
+    imsz = np.shape(image)
+    initial_fwhm = np.round(initial_fwhm).astype(int)
+    half_box = initial_fwhm
 
     #.Using sigma-clipping to model the background
     # (actually, replaced by simple median and MAD for speed)
@@ -967,42 +988,48 @@ def fwhm_fit(image, **kwargs):
     #.Detecting sources using IRAFStarfinder method
     # (actually, DAOFinder is faster than IRAFStarFinder)
     # (find_peaks is even faster, but unreliable)
-    daofinder = DAOStarFinder(5*back_std, kwargs['initial_fwhm'],
-                            roundlo=-2.0, roundhi=2.0, sharplo=0.01, sharphi=10.0,
-                            brightest=kwargs['n_max'], exclude_border=False, peakmax=kwargs['saturation'])
+    daofinder = DAOStarFinder(5*back_std, initial_fwhm,
+                            roundlo=-2.0, roundhi=2.0, 
+                            sharplo=0.01, sharphi=10.0,
+                            brightest=n_max, peakmax=saturation,
+                            exclude_border=True)
     
     #..catching zero objects warning and aborting
     with warnings.catch_warnings():
         warnings.filterwarnings("error", category=NoDetectionsWarning)
         try:
-            tab = daofinder.find_stars(image[half_box:-half_box,half_box:-half_box]-back_median)
+            tab = daofinder.find_stars(image-back_median)
             nstar = len(tab)
         except NoDetectionsWarning:
             nstar = 0
             return None
-    
-    tab['xcentroid'] += half_box
-    tab['ycentroid'] += half_box
+
     tab.sort('mag')
 
-    #.Building a global pixel grid with 1-FWHM size
+    #.Building a pixel grid with 1-FWHM size
     pos_xy = np.arange(-half_box, half_box, 1)
     global_x, global_y = np.meshgrid(pos_xy, pos_xy)
-    params, parerr = np.full((nstar,7), np.nan), np.full((nstar,7), np.nan)
+    params, parerr = np.full((nstar,8), np.nan), np.full((nstar,8), np.nan)
     semi_axes, theta = np.full((nstar,2), np.nan), np.full(nstar, np.nan)
 
     for i,row in enumerate(tab):
 
-        #.Adjusting grid for this star
+        #.Skip star if it lies near the image border 
         xcen, ycen = round(row['xcentroid']), round(row['ycentroid'])
+        if np.any(np.array([ycen,imsz[0]-ycen,xcen,imsz[1]-xcen]) <= half_box): 
+            continue
+
+        #.Adjusting grid for this star
         grid_x = global_x + xcen
         grid_y = global_y + ycen
 
         #.Fitting 2D model with curve_fit
         datax = np.vstack((grid_x.ravel(),grid_y.ravel())).astype(float)
-        datay = image[ycen-half_box:ycen+half_box, xcen-half_box:xcen+half_box].ravel()-back_median
-        p0 = [row['peak'],xcen,ycen,kwargs['initial_fwhm'],0,kwargs['initial_fwhm'],3.5]
-        fit_mask = (datay >= 1)
+        datay = image[ycen-half_box:ycen+half_box, 
+                      xcen-half_box:xcen+half_box].ravel()-back_median
+        p0 = [row['peak'],xcen,ycen,initial_fwhm,0,initial_fwhm,3.5,0.]
+        sigmay = np.sqrt(np.abs(datay)/gain)
+        fit_mask = (datay >= 0)
         #..error cactching the fitting
         with warnings.catch_warnings():
             warnings.filterwarnings("error", category=RuntimeWarning)
@@ -1010,7 +1037,7 @@ def fwhm_fit(image, **kwargs):
             try:
                 popt, pcov = curve_fit(iaf.moffatxy, 
                                        datax[:,fit_mask], datay[fit_mask],
-                                       sigma=np.sqrt(datay[fit_mask]/kwargs['gain']), 
+                                    #    sigma=sigmay[fit_mask], 
                                        p0=p0, absolute_sigma=True)
             except (RuntimeError, RuntimeWarning, OptimizeWarning):
                 continue
@@ -1021,8 +1048,8 @@ def fwhm_fit(image, **kwargs):
         parerr[i,:] = perr/popt
         
         #.deriving source morphological parameters
-        cov_ell = np.asmatrix([[popt[3]**2, np.prod(popt[3:6])],
-                               [np.prod(popt[3:6]), popt[5]**2]])
+        cov_ell = np.asmatrix([[popt[3]**2, popt[4]],
+                               [popt[4], popt[5]**2]])
 
         eigvals, eigvect = np.linalg.eig(cov_ell)
         order = eigvals.argsort()[::-1]
@@ -1031,7 +1058,7 @@ def fwhm_fit(image, **kwargs):
         theta[i] = np.rad2deg(np.arctan2(*eigvect[:,0][::-1])).item()
 
     #.composing output table
-    mask = (parerr[:,3] >= 1) | (parerr[:,5] >= 1) | (parerr[:,6] >= 1) | (params[:,6] <= 1.1)
+    mask = (parerr[:,6] >= 1) | (params[:,6] <= 1.1) | (parerr[:,3] >= 1) | (parerr[:,5] >= 1)
     params[mask,:] = np.nan
     parerr[mask,:] = np.nan
     semi_axes[mask,:] = np.nan
@@ -1040,16 +1067,159 @@ def fwhm_fit(image, **kwargs):
    #.geometric mean of semi-axes a,b
     mof_rad = np.sqrt(semi_axes[:,0]*semi_axes[:,1])
 
+    tab['I0'] = params[:,0]
+    tab['I0_err'] = parerr[:,0]
+    tab['x_fit'] = params[:,1]
+    tab['x_err'] = parerr[:,1]
+    tab['y_fit'] = params[:,2]
+    tab['y_err'] = parerr[:,2]
+    tab['a'] = params[:,3]
+    tab['a_err'] = parerr[:,3]
+    tab['b'] = params[:,4]
+    tab['b_err'] = parerr[:,4]
+    tab['c'] = params[:,5]
+    tab['c_err'] = parerr[:,5]
     tab['beta'] = params[:,6]
+    tab['beta_err'] = parerr[:,6]
+    tab['bg'] = params[:,7]
+    tab['bg_err'] = parerr[:,7]
+
     tab['major_ax'] = semi_axes[:,0]
     tab['minor_ax'] = semi_axes[:,1]
-    tab['ellipticity'] = 1-semi_axes[:,1]/semi_axes[:,0]
+    tab['ellip'] = 1-semi_axes[:,1]/semi_axes[:,0]
     tab['theta'] = theta
     tab['fwhm'] = 2*mof_rad*np.sqrt(2**(1/params[:,6])-1)
     tab['r50'] = mof_rad*np.sqrt(2**(1/(params[:,6]-1))-1)
+    tab['error'] = np.median(parerr,axis=1)
+
     tab.meta = {'back': back_median, 'back_rms': back_std}
     tab.remove_column('id')
 
     return tab
 
 
+def fwhm_gaussian(image, **kwargs):
+
+    n_max =         kwargs.pop('n_max', 50)
+    saturation =    kwargs.pop('saturation', 52430.)
+    initial_fwhm =  kwargs.pop('initial_fwhm', 10.)
+    gain =          kwargs.pop('gain', 1.)
+
+    imsz = np.shape(image)
+    initial_fwhm = np.round(initial_fwhm).astype(int)
+    half_box = initial_fwhm
+
+    #.Using sigma-clipping to model the background
+    # (actually, replaced by simple median and MAD for speed)
+    back_median = np.nanmedian(image)
+    back_std = 1.4826*np.nanmedian(np.abs(image-back_median))
+
+    #.Detecting sources using IRAFStarfinder method
+    # (actually, DAOFinder is faster than IRAFStarFinder)
+    # (find_peaks is even faster, but unreliable)
+    daofinder = DAOStarFinder(5*back_std, initial_fwhm,
+                            roundlo=-2.0, roundhi=2.0, 
+                            sharplo=0.01, sharphi=10.0,
+                            brightest=n_max, peakmax=saturation,
+                            exclude_border=True)
+    
+    #..catching zero objects warning and aborting
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", category=NoDetectionsWarning)
+        try:
+            tab = daofinder.find_stars(image-back_median)
+            nstar = len(tab)
+        except NoDetectionsWarning:
+            nstar = 0
+            return None
+
+    tab.sort('mag')
+
+    #.Building a pixel grid with 1-FWHM size
+    pos_xy = np.arange(-half_box, half_box, 1)
+    global_x, global_y = np.meshgrid(pos_xy, pos_xy)
+    params, parerr = np.full((nstar,7), np.nan), np.full((nstar,7), np.nan)
+    semi_axes, theta = np.full((nstar,2), np.nan), np.full(nstar, np.nan)
+
+    for i,row in enumerate(tab):
+
+        #.Skip star if it lies near the image border 
+        xcen, ycen = round(row['xcentroid']), round(row['ycentroid'])
+        if np.any(np.array([ycen,imsz[0]-ycen,xcen,imsz[1]-xcen]) <= half_box): 
+            continue
+
+        #.Adjusting grid for this star
+        grid_x = global_x + xcen
+        grid_y = global_y + ycen
+
+        #.Fitting 2D model with curve_fit
+        datax = np.vstack((grid_x.ravel(),grid_y.ravel())).astype(float)
+        datay = image[ycen-half_box:ycen+half_box, xcen-half_box:xcen+half_box].ravel()-back_median
+        p0 = [row['peak'],xcen,ycen,initial_fwhm,0.,initial_fwhm,0.]
+        sigmay = np.sqrt(np.abs(datay)/gain)
+        fit_mask = (datay >= 0)
+        #..error cactching the fitting
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", category=RuntimeWarning)
+            warnings.filterwarnings("error", category=OptimizeWarning)
+            try:
+                popt, pcov = curve_fit(iaf.gaussxy, 
+                                       datax[:,fit_mask], datay[fit_mask],
+                                    #    sigma=sigmay[fit_mask], 
+                                       p0=p0, absolute_sigma=True)
+            except (RuntimeError, RuntimeWarning, OptimizeWarning):
+                continue
+
+        #..gathering resulting coefficients
+        perr = np.sqrt(np.diag(pcov))
+        params[i,:] = popt
+        parerr[i,:] = perr/popt
+        
+        #.deriving source morphological parameters
+        b = popt[3]*popt[4]*popt[5]
+        cov_ell = np.asmatrix([[popt[3]**2, b],
+                               [b, popt[5]**2]])
+
+        eigvals, eigvect = np.linalg.eig(cov_ell)
+        order = eigvals.argsort()[::-1]
+        eigvals, eigvect = eigvals[order], eigvect[:,order]
+        semi_axes[i,:] = np.sqrt(abs(eigvals))
+        theta[i] = np.rad2deg(np.arctan2(*eigvect[:,0][::-1])).item()
+
+    #.composing output table
+    mask = (parerr[:,3] >= 1) | (parerr[:,5] >= 1)
+    params[mask,:] = np.nan
+    parerr[mask,:] = np.nan
+    semi_axes[mask,:] = np.nan
+    theta[mask] = np.nan
+
+   #.geometric mean of semi-axes a,b
+    ell_rad = np.sqrt(semi_axes[:,0]*semi_axes[:,1])
+
+    tab['I0'] = params[:,0]
+    tab['I0_err'] = parerr[:,0]
+    tab['x_fit'] = params[:,1]
+    tab['x_err'] = parerr[:,1]
+    tab['y_fit'] = params[:,2]
+    tab['y_err'] = parerr[:,2]
+    tab['a'] = params[:,3]
+    tab['a_err'] = parerr[:,3]
+    tab['b'] = params[:,4]
+    tab['b_err'] = parerr[:,4]
+    tab['c'] = params[:,5]
+    tab['c_err'] = parerr[:,5]
+    tab['bg'] = params[:,6]
+    tab['bg_err'] = parerr[:,6]
+
+    tab['major_ax'] = semi_axes[:,0]
+    tab['minor_ax'] = semi_axes[:,1]
+    tab['ellip'] = 1-semi_axes[:,1]/semi_axes[:,0]
+    tab['theta'] = theta
+    tab['fwhm'] = 2*ell_rad*np.sqrt(2*np.log(2))
+    tab['r50'] = ell_rad**np.sqrt(2*np.log(2))
+    tab['error'] = np.median(parerr,axis=1)
+
+    tab.meta = {'back': back_median, 'back_rms': back_std}
+    tab.remove_column('id')
+
+    return tab
