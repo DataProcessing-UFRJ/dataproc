@@ -2,6 +2,8 @@ import os, re
 from copy import copy, deepcopy
 import numpy as np
 from datetime import datetime
+from ccdproc import ImageFileCollection
+from functools import partial
 from astropy.io import fits
 from astropy.coordinates import Angle, SkyCoord
 from astropy.wcs import WCS
@@ -14,6 +16,8 @@ from photutils.detection import DAOStarFinder
 from astroquery.vizier import Vizier
 from astroquery.gaia import Gaia
 from inspect import signature
+from multiprocessing import Pool
+from psutil import cpu_count
 
 from matplotlib import pyplot as plt
 from packages.dataprocessing_functions import header_init
@@ -21,6 +25,33 @@ from packages.dataprocessing_functions import header_init
 import warnings
 from astropy.utils.exceptions import AstropyUserWarning
 from astropy.wcs import WCS, FITSFixedWarning
+
+
+def astrometry_solve(dataset, multiprocessing=False, **kwargs):
+
+    #.If input dataset is a folder, expand it into a ImageFileCollection
+    if isinstance(dataset,str): 
+        ifc = ImageFileCollection(dataset, ext=0,
+         keywords=['obstype','ut','ccdsum','airmass','exptime','object'],
+         glob_exclude="*master*.fits, bpm*.fits", glob_include="*.fits")
+    
+    #.Otherwise the input dataset is already a ImageFileCollection
+    else: ifc = dataset
+
+    #.grouping SCIENCE images in a list 
+    object_ifc = ifc.filter(obstype='OBJECT', regex_match=True)
+    file_list = object_ifc.files
+
+    #.Calculating astrometric solution for each image
+    if multiprocessing:
+        n_chunks, n_workers = 10, cpu_count(logical=False)-1
+        chunk_size = max(1, round(len(file_list)/(n_chunks*n_workers)))
+        with Pool(processes=n_workers) as pool:
+            pool.map(partial(wcs_solve,**kwargs), file_list, 
+                     chunksize=chunk_size)
+    else:
+        for file in file_list:
+            wcs_solve(file, **kwargs)
 
 
 def wcs_solve(image, 

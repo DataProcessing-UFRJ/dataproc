@@ -413,7 +413,7 @@ def moffatxy(xy,I,x0,y0,a,b,c,g,bg):
             each coordinate pair            
     """
     xy0 = np.array([x0,y0]).reshape((2,1))
-    cov_mat = np.asmatrix([[a**2, b], [b, c**2]])
+    cov_mat = np.asmatrix([[a**2, b*a*c], [b*a*c, c**2]])
     cov_inv = np.linalg.inv(cov_mat)
     squared_mahalanobis = np.diag(np.dot(np.dot((xy-xy0).T,cov_inv),(xy-xy0)))
 

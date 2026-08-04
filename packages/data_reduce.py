@@ -3,7 +3,7 @@ import warnings
 from os import path
 from argparse import ArgumentParser
 from packages.dataprocessing_functions import acquisition_remove, header_setup, process_bias, process_flat, process_images, reject_cosmicrays, fwhm_estimate
-from packages.astrometry_solve import astrometry_solve
+from packages.wcs_functions import astrometry_solve
 from packages.coadd_functions import create_image_sets, coadd_imageset
 
 warnings.simplefilter('ignore',UserWarning)

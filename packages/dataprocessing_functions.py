@@ -12,6 +12,7 @@ from astropy.stats import mad_std
 from photutils.detection import DAOStarFinder
 from scipy.optimize import curve_fit
 from functools import partial
+from psutil import cpu_count
 from multiprocessing import Pool
 from multiprocessing.shared_memory import SharedMemory
 from ccdproc import ImageFileCollection, subtract_overscan, trim_image, subtract_bias, flat_correct, cosmicray_lacosmic, Combiner
@@ -142,9 +143,11 @@ def header_setup(dataset, instrument='SAMI', multiprocessing=False):
     image_list = ifc.files_filtered(include_path=True)
 
     if multiprocessing:
-        with Pool() as pool:
+        n_chunks, n_workers = 10, cpu_count(logical=False)-1
+        chunk_size = max(1, round(len(image_list)/(n_chunks*n_workers)))
+        with Pool(processes=n_workers) as pool:
             pool.map(partial(header_image, instrument=instrument), 
-                     image_list)
+                     image_list, chunksize=chunk_size)
 
     else: 
         for file in image_list:
@@ -492,9 +495,12 @@ def process_bias(ifc,
     
     #.OVERSCAN correction
     if multiprocessing: 
-        with Pool() as pool:
+        n_chunks, n_workers = 10, cpu_count(logical=False)-1
+        chunk_size = max(1, round(len(file_list)/(n_chunks*n_workers)))
+        with Pool(processes=n_workers) as pool:
             pool.map(partial(reduce_image, master_bias=None, master_flat=None,
-                             merge_amplifiers=False), file_list)
+                             merge_amplifiers=False), file_list,
+                             chunksize=chunk_size)
     else: 
         for file in file_list: 
             reduce_image(file, master_bias=None, master_flat=None, merge_amplifiers=False)
@@ -605,10 +611,13 @@ def process_flat(ifc,
         #..loading 'master bias' in a memory buffer
         mbias_ccd = iaf.image_to_memory(master_bias)
         #..distributing images reduction to multiple processors
-        with Pool() as pool:
+        n_chunks, n_workers = 10, cpu_count(logical=False)-1
+        chunk_size = max(1, round(len(file_list)/(n_chunks*n_workers)))
+        with Pool(processes=n_workers) as pool:
             pool.map(partial(reduce_image, master_bias=mbias_ccd, 
                              master_flat=None, shared_memory=True,
-                             merge_amplifiers=False), file_list)
+                             merge_amplifiers=False), file_list,
+                             chunksize=chunk_size)
         #..clearing memory buffers 
         iaf.unlink_memory(mbias_ccd)
     else: 
@@ -741,7 +750,7 @@ def process_images(ifc,
     master_flat = master_flat.split('.fits')[0]
 
     #.identifing 'master flats' in the folder
-    mflat_list = np.sort(glob.glob(master_flat+'*.fits'))
+    mflat_list = np.sort(glob.glob(master_flat+'?.fits'))
     flat_filters = iaf.image_filters(mflat_list, filter_keywords=filter_keywords)
 
     #.grouping SCIENCE images in a list 
@@ -758,10 +767,12 @@ def process_images(ifc,
         mflat_ccd = [iaf.image_to_memory(flat, name='mflat'+flat.split('.fits')[0][-1]) 
                      for flat in mflat_list]
         #..distributing images reduction to multiple processors
-        with Pool() as pool:
+        n_chunks, n_workers = 10, cpu_count(logical=False)-1
+        chunk_size = max(1, round(len(file_list)/(n_chunks*n_workers)))
+        with Pool(processes=n_workers) as pool:
             pool.starmap(partial(reduce_image_mp, master_bias=mbias_ccd,
                          master_flats_list=mflat_ccd), 
-                         zip(file_list,obj_filters))
+                         zip(file_list,obj_filters), chunksize=chunk_size)
         #..clearing memory buffers 
         iaf.unlink_memory(mbias_ccd)
         for flat in mflat_ccd: iaf.unlink_memory(flat)
@@ -868,17 +879,24 @@ def fwhm_estimate(dataset, multiprocessing=False, **kwargs):
 
     #.estimating FHWM for each image
     if multiprocessing: 
-        with Pool() as pool:
-            pool.map(partial(fwhm_image, **kwargs), obj_list)
+        n_chunks, n_workers = 10, cpu_count(logical=False)-1
+        chunk_size = max(1, round(len(obj_list)/(n_chunks*n_workers)))
+        with Pool(processes=n_workers) as pool:
+            pool.map(partial(fwhm_image, **kwargs), obj_list, 
+                     chunksize=chunk_size)
     else: 
         for file in obj_list: 
             fwhm_image(file, **kwargs)
 
 
-def fwhm_image(file, is_hdu=False, **kwargs):
+def fwhm_image(file, is_hdu=False, redo_fwhm=False, save_table=False, **kwargs):
 
-    if is_hdu: hdul=file
+    if is_hdu: 
+        hdul = file
+        file = hdul.filename()
     else: hdul = fits.open(file, mode='update')
+
+    folder = os.path.dirname(file)
 
     fwhm_model = kwargs.pop('fwhm_model', 'gaussian')
     border_size = kwargs.pop('border_size', 0.20)
@@ -890,12 +908,12 @@ def fwhm_image(file, is_hdu=False, **kwargs):
 
     #.aborting if FWHM is found in header
     ifwhm = hdul[0].header.get('FWHM')
-    if ifwhm:
+    if ifwhm and not redo_fwhm:
         print(f".FWHM found in header = {ifwhm:.2f}")
         return
 
     #.looping over the image extensions
-    image_indices = iaf.image_extensions(file, is_hdu=is_hdu)
+    image_indices = iaf.image_extensions(hdul, is_hdu=True)
     n_ext = len(image_indices)
     table = None
     for ext in image_indices:
@@ -912,16 +930,19 @@ def fwhm_image(file, is_hdu=False, **kwargs):
         else: data = img
     
     #.getting header keywords
+        if 'initial_fwhm' not in kwargs:
+            kwargs['initial_fwhm'] = hdr.get('FWHM', default=10.)
         if 'saturation' not in kwargs:
-            kwargs['saturation'] = hdr.get('SATURATE', default=52430)
+            kwargs['saturation'] = hdr.get('SATURATE', default=52430.)
         if 'gain' not in kwargs:
-            kwargs['gain'] = hdr.get('GAIN', default=1)
+            kwargs['gain'] = hdr.get('GAIN', default=1.)
+        if 'exptime' not in kwargs:
+            kwargs['exptime'] = hdr.get('EXPTIME', default=1.)
 
     #.calculating FWHM for this extension stars
         ext_tab = fwhm_fit(data, **kwargs)
         if (ext_tab is None) or (np.sum(np.isfinite(ext_tab['fwhm'])) < 3): 
-            if 'initial_fwhm' not in kwargs: kwargs['initial_fwhm'] = 20.
-            else: kwargs['initial_fwhm'] *= 2
+            kwargs['initial_fwhm'] *= 2
             ext_tab = fwhm_fit(data, **kwargs)
     #..stacking tables from multiple extensions
         if ext_tab is None: continue
@@ -944,6 +965,13 @@ def fwhm_image(file, is_hdu=False, **kwargs):
     else: 
         fwhm = np.median(table['fwhm'][good_data])
         print(f"median value FWHM = {fwhm:5.2f} ({n_good} stars)")
+        if save_table:
+            for col in table.colnames: 
+                table[col] = table[col].astype(np.single)
+                table[col].format = '{:.7g}'
+            table_file = os.path.splitext(os.path.basename(file))[0]+'.csv'
+            table.write(os.path.join(folder,table_file), 
+                        overwrite=True, serialize_method='data_mask')
 
     #.Getting median parameters values and storing in header
     for ext in np.append(image_indices, 0):
@@ -975,10 +1003,11 @@ def fwhm_moffat(image, **kwargs):
     saturation =    kwargs.pop('saturation', 52430.)
     initial_fwhm =  kwargs.pop('initial_fwhm', 10.)
     gain =          kwargs.pop('gain', 1.)
+    exptime =       kwargs.pop('exptime', 1.)
 
     imsz = np.shape(image)
     initial_fwhm = np.round(initial_fwhm).astype(int)
-    half_box = initial_fwhm
+    half_box = min(15,initial_fwhm)
 
     #.Using sigma-clipping to model the background
     # (actually, replaced by simple median and MAD for speed)
@@ -988,7 +1017,7 @@ def fwhm_moffat(image, **kwargs):
     #.Detecting sources using IRAFStarfinder method
     # (actually, DAOFinder is faster than IRAFStarFinder)
     # (find_peaks is even faster, but unreliable)
-    daofinder = DAOStarFinder(5*back_std, initial_fwhm,
+    daofinder = DAOStarFinder(5*back_std, min(15,initial_fwhm),
                             roundlo=-2.0, roundhi=2.0, 
                             sharplo=0.01, sharphi=10.0,
                             brightest=n_max, peakmax=saturation,
@@ -1003,7 +1032,8 @@ def fwhm_moffat(image, **kwargs):
         except NoDetectionsWarning:
             nstar = 0
             return None
-
+    mask = tab['flux'] > 0
+    tab['mag'][mask] = 25. - 2.5*np.log10(tab['flux'][mask]/exptime)
     tab.sort('mag')
 
     #.Building a pixel grid with 1-FWHM size
@@ -1011,6 +1041,8 @@ def fwhm_moffat(image, **kwargs):
     global_x, global_y = np.meshgrid(pos_xy, pos_xy)
     params, parerr = np.full((nstar,8), np.nan), np.full((nstar,8), np.nan)
     semi_axes, theta = np.full((nstar,2), np.nan), np.full(nstar, np.nan)
+    semi_aerr = np.full((nstar,2), np.nan)
+    # theta_err, ellip_err = np.full(nstar, np.nan), np.full(nstar, np.nan)
 
     for i,row in enumerate(tab):
 
@@ -1027,9 +1059,13 @@ def fwhm_moffat(image, **kwargs):
         datax = np.vstack((grid_x.ravel(),grid_y.ravel())).astype(float)
         datay = image[ycen-half_box:ycen+half_box, 
                       xcen-half_box:xcen+half_box].ravel()-back_median
-        p0 = [row['peak'],xcen,ycen,initial_fwhm,0,initial_fwhm,3.5,0.]
+        fwhm0 = min(15,initial_fwhm)
+        p0 = [row['peak'],xcen,ycen,fwhm0,0.,fwhm0,3.5,0.]
         sigmay = np.sqrt(np.abs(datay)/gain)
+        
         fit_mask = (datay >= 0)
+        if np.count_nonzero(fit_mask) < half_box**2: continue
+
         #..error cactching the fitting
         with warnings.catch_warnings():
             warnings.filterwarnings("error", category=RuntimeWarning)
@@ -1037,7 +1073,7 @@ def fwhm_moffat(image, **kwargs):
             try:
                 popt, pcov = curve_fit(iaf.moffatxy, 
                                        datax[:,fit_mask], datay[fit_mask],
-                                    #    sigma=sigmay[fit_mask], 
+                                       sigma=sigmay[fit_mask], 
                                        p0=p0, absolute_sigma=True)
             except (RuntimeError, RuntimeWarning, OptimizeWarning):
                 continue
@@ -1045,11 +1081,12 @@ def fwhm_moffat(image, **kwargs):
         #..gathering resulting coefficients
         perr = np.sqrt(np.diag(pcov))
         params[i,:] = popt
-        parerr[i,:] = perr/popt
+        parerr[i,:] = perr
         
         #.deriving source morphological parameters
-        cov_ell = np.asmatrix([[popt[3]**2, popt[4]],
-                               [popt[4], popt[5]**2]])
+        b = popt[3]*popt[4]*popt[5]
+        cov_ell = np.asmatrix([[popt[3]**2, b],
+                               [b, popt[5]**2]])
 
         eigvals, eigvect = np.linalg.eig(cov_ell)
         order = eigvals.argsort()[::-1]
@@ -1057,15 +1094,29 @@ def fwhm_moffat(image, **kwargs):
         semi_axes[i,:] = np.sqrt(abs(eigvals))
         theta[i] = np.rad2deg(np.arctan2(*eigvect[:,0][::-1])).item()
 
+        #..propagating uncertainties
+        eb = b*np.sqrt((perr[3]/popt[3])**2 + (perr[4]/popt[4])**2 + (perr[5]/popt[5])**2)
+        cov_err = np.asmatrix([[2*popt[3]*perr[3], eb],
+                               [eb, 2*popt[5]*perr[5]]])
+        eigv_err = [np.dot(np.dot(eigvect[:,0].T, cov_err),eigvect[:,0]).item(),
+                    np.dot(np.dot(eigvect[:,1].T, cov_err),eigvect[:,1]).item()]
+        semi_aerr[i,:] = np.sqrt(np.abs(eigv_err))
+        # y, x = eigvect[:,0][::-1]
+        # ey, ex = semi_aerr[i,:], eb 
+        # theta_err[i] = np.rad2deg(np.sqrt(y**2*ex**2 + x**2*ey**2)/(x**2+y**2))
+        # ell_err[i] = np.sqrt((semi_aerr[i,1]/semi_axes[i,0])**2 + 
+        #                      (semi_aerr[i,0]*semi_axes[i,1]/semi_axes[i,0]**2)**2)
+
     #.composing output table
-    mask = (parerr[:,6] >= 1) | (params[:,6] <= 1.1) | (parerr[:,3] >= 1) | (parerr[:,5] >= 1)
+    mask = (parerr[:,6]/params[:,6] >= 1) | (params[:,6] <= 1.1) | \
+           (parerr[:,3]/params[:,3] >= 1) | (parerr[:,5]/params[:,5] >= 1)
     params[mask,:] = np.nan
     parerr[mask,:] = np.nan
     semi_axes[mask,:] = np.nan
     theta[mask] = np.nan
 
    #.geometric mean of semi-axes a,b
-    mof_rad = np.sqrt(semi_axes[:,0]*semi_axes[:,1])
+    ell_rad = np.sqrt(semi_axes[:,0]*semi_axes[:,1])
 
     tab['I0'] = params[:,0]
     tab['I0_err'] = parerr[:,0]
@@ -1073,27 +1124,21 @@ def fwhm_moffat(image, **kwargs):
     tab['x_err'] = parerr[:,1]
     tab['y_fit'] = params[:,2]
     tab['y_err'] = parerr[:,2]
-    tab['a'] = params[:,3]
-    tab['a_err'] = parerr[:,3]
-    tab['b'] = params[:,4]
-    tab['b_err'] = parerr[:,4]
-    tab['c'] = params[:,5]
-    tab['c_err'] = parerr[:,5]
     tab['beta'] = params[:,6]
     tab['beta_err'] = parerr[:,6]
     tab['bg'] = params[:,7]
     tab['bg_err'] = parerr[:,7]
-
-    tab['major_ax'] = semi_axes[:,0]
-    tab['minor_ax'] = semi_axes[:,1]
+    tab['smajor_ax'] = semi_axes[:,0]
+    tab['smajor_err'] = semi_aerr[:,0]
+    tab['sminor_ax'] = semi_axes[:,1]
+    tab['sminor_err'] = semi_aerr[:,1]
     tab['ellip'] = 1-semi_axes[:,1]/semi_axes[:,0]
     tab['theta'] = theta
-    tab['fwhm'] = 2*mof_rad*np.sqrt(2**(1/params[:,6])-1)
-    tab['r50'] = mof_rad*np.sqrt(2**(1/(params[:,6]-1))-1)
-    tab['error'] = np.median(parerr,axis=1)
+    tab['fwhm'] = 2*ell_rad*np.sqrt(2**(1/params[:,6])-1)
+    tab['r50'] = ell_rad*np.sqrt(2**(1/(params[:,6]-1))-1)
 
     tab.meta = {'back': back_median, 'back_rms': back_std}
-    tab.remove_column('id')
+    tab.remove_columns(['id','daofind_mag'])
 
     return tab
 
@@ -1104,10 +1149,11 @@ def fwhm_gaussian(image, **kwargs):
     saturation =    kwargs.pop('saturation', 52430.)
     initial_fwhm =  kwargs.pop('initial_fwhm', 10.)
     gain =          kwargs.pop('gain', 1.)
+    exptime =       kwargs.pop('exptime', 1.)
 
     imsz = np.shape(image)
     initial_fwhm = np.round(initial_fwhm).astype(int)
-    half_box = initial_fwhm
+    half_box = min(15,initial_fwhm)
 
     #.Using sigma-clipping to model the background
     # (actually, replaced by simple median and MAD for speed)
@@ -1117,7 +1163,7 @@ def fwhm_gaussian(image, **kwargs):
     #.Detecting sources using IRAFStarfinder method
     # (actually, DAOFinder is faster than IRAFStarFinder)
     # (find_peaks is even faster, but unreliable)
-    daofinder = DAOStarFinder(5*back_std, initial_fwhm,
+    daofinder = DAOStarFinder(5*back_std, min(15,initial_fwhm),
                             roundlo=-2.0, roundhi=2.0, 
                             sharplo=0.01, sharphi=10.0,
                             brightest=n_max, peakmax=saturation,
@@ -1132,14 +1178,18 @@ def fwhm_gaussian(image, **kwargs):
         except NoDetectionsWarning:
             nstar = 0
             return None
-
+        
+    mask = tab['flux'] > 0
+    tab['mag'][mask] = 25. - 2.5*np.log10(tab['flux'][mask]/exptime)
     tab.sort('mag')
-
+    
     #.Building a pixel grid with 1-FWHM size
     pos_xy = np.arange(-half_box, half_box, 1)
     global_x, global_y = np.meshgrid(pos_xy, pos_xy)
     params, parerr = np.full((nstar,7), np.nan), np.full((nstar,7), np.nan)
     semi_axes, theta = np.full((nstar,2), np.nan), np.full(nstar, np.nan)
+    semi_aerr = np.full((nstar,2), np.nan)
+    # theta_err, ellip_err = np.full(nstar, np.nan), np.full(nstar, np.nan)
 
     for i,row in enumerate(tab):
 
@@ -1155,9 +1205,13 @@ def fwhm_gaussian(image, **kwargs):
         #.Fitting 2D model with curve_fit
         datax = np.vstack((grid_x.ravel(),grid_y.ravel())).astype(float)
         datay = image[ycen-half_box:ycen+half_box, xcen-half_box:xcen+half_box].ravel()-back_median
-        p0 = [row['peak'],xcen,ycen,initial_fwhm,0.,initial_fwhm,0.]
+        fwhm0 = min(15,initial_fwhm)
+        p0 = [row['peak'],xcen,ycen,fwhm0,0.,fwhm0,0.]
         sigmay = np.sqrt(np.abs(datay)/gain)
+
         fit_mask = (datay >= 0)
+        if np.count_nonzero(fit_mask) < half_box**2: continue
+
         #..error cactching the fitting
         with warnings.catch_warnings():
             warnings.filterwarnings("error", category=RuntimeWarning)
@@ -1173,7 +1227,7 @@ def fwhm_gaussian(image, **kwargs):
         #..gathering resulting coefficients
         perr = np.sqrt(np.diag(pcov))
         params[i,:] = popt
-        parerr[i,:] = perr/popt
+        parerr[i,:] = perr
         
         #.deriving source morphological parameters
         b = popt[3]*popt[4]*popt[5]
@@ -1186,8 +1240,21 @@ def fwhm_gaussian(image, **kwargs):
         semi_axes[i,:] = np.sqrt(abs(eigvals))
         theta[i] = np.rad2deg(np.arctan2(*eigvect[:,0][::-1])).item()
 
+        #..propagating uncertainties
+        eb = b*np.sqrt((perr[3]/popt[3])**2 + (perr[4]/popt[4])**2 + (perr[5]/popt[5])**2)
+        cov_err = np.asmatrix([[2*popt[3]*perr[3], eb],
+                               [eb, 2*popt[5]*perr[5]]])
+        eigv_err = [np.dot(np.dot(eigvect[:,0].T, cov_err),eigvect[:,0]).item(),
+                    np.dot(np.dot(eigvect[:,1].T, cov_err),eigvect[:,1]).item()]
+        semi_aerr[i,:] = np.sqrt(np.abs(eigv_err))
+        # y, x = eigvect[:,0][::-1]
+        # ey, ex = semi_aerr[i,:], eb 
+        # theta_err[i] = np.rad2deg(np.sqrt(y**2*ex**2 + x**2*ey**2)/(x**2+y**2))
+        # ell_err[i] = np.sqrt((semi_aerr[i,1]/semi_axes[i,0])**2 + 
+        #                      (semi_aerr[i,0]*semi_axes[i,1]/semi_axes[i,0]**2)**2)
+
     #.composing output table
-    mask = (parerr[:,3] >= 1) | (parerr[:,5] >= 1)
+    mask = (parerr[:,3]/params[:,3] >= 1) | (parerr[:,5]/params[:,5] >= 1)
     params[mask,:] = np.nan
     parerr[mask,:] = np.nan
     semi_axes[mask,:] = np.nan
@@ -1202,24 +1269,18 @@ def fwhm_gaussian(image, **kwargs):
     tab['x_err'] = parerr[:,1]
     tab['y_fit'] = params[:,2]
     tab['y_err'] = parerr[:,2]
-    tab['a'] = params[:,3]
-    tab['a_err'] = parerr[:,3]
-    tab['b'] = params[:,4]
-    tab['b_err'] = parerr[:,4]
-    tab['c'] = params[:,5]
-    tab['c_err'] = parerr[:,5]
     tab['bg'] = params[:,6]
     tab['bg_err'] = parerr[:,6]
-
-    tab['major_ax'] = semi_axes[:,0]
-    tab['minor_ax'] = semi_axes[:,1]
+    tab['smajor_ax'] = semi_axes[:,0]
+    tab['smajor_err'] = semi_aerr[:,0]
+    tab['sminor_ax'] = semi_axes[:,1]
+    tab['sminor_err'] = semi_aerr[:,1]
     tab['ellip'] = 1-semi_axes[:,1]/semi_axes[:,0]
     tab['theta'] = theta
     tab['fwhm'] = 2*ell_rad*np.sqrt(2*np.log(2))
     tab['r50'] = ell_rad**np.sqrt(2*np.log(2))
-    tab['error'] = np.median(parerr,axis=1)
 
     tab.meta = {'back': back_median, 'back_rms': back_std}
-    tab.remove_column('id')
+    tab.remove_columns(['id','daofind_mag'])
 
     return tab
